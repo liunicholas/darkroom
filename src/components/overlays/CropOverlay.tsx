@@ -5,7 +5,7 @@ import { useEditorStore } from '@/stores/editor-store'
 
 interface CropOverlayProps {
   imageDisplay: { x: number; y: number; width: number; height: number }
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement | null>
 }
 
 type HandleType = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'move'

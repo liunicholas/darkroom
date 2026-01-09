@@ -6,7 +6,7 @@ import type { RadialGradientData, LinearGradientData } from '@/types/edit-state'
 
 interface GradientHandlesProps {
   imageDisplay: { x: number; y: number; width: number; height: number }
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement | null>
 }
 
 export function RadialGradientHandles({ imageDisplay, containerRef }: GradientHandlesProps) {

@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useEditorStore } from '@/stores/editor-store'
 
 interface BrushCursorProps {
-  containerRef: React.RefObject<HTMLDivElement>
+  containerRef: React.RefObject<HTMLDivElement | null>
   imageDisplay: { x: number; y: number; width: number; height: number } | null
   imageWidth: number
   imageHeight: number

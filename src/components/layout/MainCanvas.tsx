@@ -432,7 +432,8 @@ export function MainCanvas() {
   // Mouse wheel zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
-    const delta = e.deltaY > 0 ? 0.9 : 1.1
+    // Reduced sensitivity: 3% zoom per scroll step
+    const delta = e.deltaY > 0 ? 0.97 : 1.03
     setZoom(zoom * delta)
   }, [zoom, setZoom])
 
