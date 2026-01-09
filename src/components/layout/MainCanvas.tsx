@@ -41,6 +41,7 @@ export function MainCanvas() {
   const brushSettings = useEditorStore((state) => state.brushSettings)
   const activeMaskId = useEditorStore((state) => state.editState.activeMaskId)
   const masks = useEditorStore((state) => state.editState.masks)
+  const crop = useEditorStore((state) => state.editState.crop)
   const pushHistory = useEditorStore((state) => state.pushHistory)
 
   // Initialize offscreen canvas and WebGL renderer
@@ -177,6 +178,60 @@ export function MainCanvas() {
       cancelAnimationFrame(animationFrameRef.current)
     }
 
+    // Check if we should apply crop (only when crop tool is not active)
+    const shouldApplyCrop = activeTool !== 'crop'
+
+    // Helper function to draw image with optional crop, rotation, and flip transforms
+    const drawTransformedImage = (
+      source: CanvasImageSource,
+      destX: number,
+      destY: number,
+      destWidth: number,
+      destHeight: number
+    ) => {
+      ctx.save()
+
+      // Get source dimensions
+      const sourceWidth = source instanceof HTMLVideoElement ? source.videoWidth : (source as HTMLCanvasElement | HTMLImageElement | ImageBitmap).width
+      const sourceHeight = source instanceof HTMLVideoElement ? source.videoHeight : (source as HTMLCanvasElement | HTMLImageElement | ImageBitmap).height
+
+      // Move to center of where image will be drawn
+      const centerX = destX + destWidth / 2
+      const centerY = destY + destHeight / 2
+      ctx.translate(centerX, centerY)
+
+      // Apply rotation (always apply when non-zero)
+      if (crop.rotation !== 0) {
+        ctx.rotate((crop.rotation * Math.PI) / 180)
+      }
+
+      // Apply flips (always apply)
+      const scaleX = crop.flipHorizontal ? -1 : 1
+      const scaleY = crop.flipVertical ? -1 : 1
+      if (scaleX !== 1 || scaleY !== 1) {
+        ctx.scale(scaleX, scaleY)
+      }
+
+      if (shouldApplyCrop && (crop.x !== 0 || crop.y !== 0 || crop.width !== 1 || crop.height !== 1)) {
+        // Apply crop: draw only the cropped region
+        const srcX = crop.x * sourceWidth
+        const srcY = crop.y * sourceHeight
+        const srcW = crop.width * sourceWidth
+        const srcH = crop.height * sourceHeight
+
+        ctx.drawImage(
+          source,
+          srcX, srcY, srcW, srcH,  // Source crop region
+          -destWidth / 2, -destHeight / 2, destWidth, destHeight  // Destination
+        )
+      } else {
+        // No crop applied: draw full image
+        ctx.drawImage(source, -destWidth / 2, -destHeight / 2, destWidth, destHeight)
+      }
+
+      ctx.restore()
+    }
+
     const renderFrame = () => {
       // Ensure display canvas matches container size
       if (displayCanvas.width !== canvasSize.width || displayCanvas.height !== canvasSize.height) {
@@ -197,16 +252,16 @@ export function MainCanvas() {
         // Split view: left shows original, right shows edited (position adjustable)
         const splitX = canvasSize.width * splitPosition
 
-        // Draw edited image (full)
-        ctx.drawImage(offscreen, x, y, width, height)
+        // Draw edited image (full) with transforms
+        drawTransformedImage(offscreen, x, y, width, height)
 
-        // Clip to left of split and draw original on top
+        // Clip to left of split and draw original on top (with transforms)
         ctx.save()
         ctx.beginPath()
         ctx.rect(0, 0, splitX, canvasSize.height)
         ctx.clip()
         if (imageSource.proxyBitmap) {
-          ctx.drawImage(imageSource.proxyBitmap, x, y, width, height)
+          drawTransformedImage(imageSource.proxyBitmap, x, y, width, height)
         }
         ctx.restore()
 
@@ -274,8 +329,8 @@ export function MainCanvas() {
           ctx.fillText('After', afterLabelX, canvasSize.height - 17)
         }
       } else {
-        // Normal view: just show edited image
-        ctx.drawImage(offscreen, x, y, width, height)
+        // Normal view: show edited image with transforms
+        drawTransformedImage(offscreen, x, y, width, height)
       }
 
       // Draw mask overlay (red tint showing masked area)
@@ -358,7 +413,7 @@ export function MainCanvas() {
         cancelAnimationFrame(animationFrameRef.current)
       }
     }
-  }, [imageSource, canvasSize, editState, imageDisplay, showBeforeAfter, splitPosition, showMaskOverlay, activeMaskId, masks, isBrushPainting])
+  }, [imageSource, canvasSize, editState, imageDisplay, showBeforeAfter, splitPosition, showMaskOverlay, activeMaskId, masks, isBrushPainting, crop, activeTool])
 
   // Mouse wheel zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {

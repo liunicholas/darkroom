@@ -49,12 +49,18 @@ export function CropPanel() {
   }, [setCrop, crop.flipVertical, pushHistory])
 
   const handleRotate90CW = useCallback(() => {
-    setCrop({ rotation: (crop.rotation + 90) % 360 })
+    // Keep rotation in -180 to 180 range
+    let newRotation = crop.rotation + 90
+    if (newRotation > 180) newRotation -= 360
+    setCrop({ rotation: newRotation })
     pushHistory('Rotate 90 CW')
   }, [setCrop, crop.rotation, pushHistory])
 
   const handleRotate90CCW = useCallback(() => {
-    setCrop({ rotation: (crop.rotation - 90 + 360) % 360 })
+    // Keep rotation in -180 to 180 range
+    let newRotation = crop.rotation - 90
+    if (newRotation < -180) newRotation += 360
+    setCrop({ rotation: newRotation })
     pushHistory('Rotate 90 CCW')
   }, [setCrop, crop.rotation, pushHistory])
 

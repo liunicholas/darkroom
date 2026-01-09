@@ -28,6 +28,7 @@ export function CropOverlay({ imageDisplay, containerRef }: CropOverlayProps) {
     height: crop.height * imageDisplay.height,
   }
 
+  // Get the target aspect ratio for the crop (in pixel terms)
   const getAspectRatio = useCallback(() => {
     if (!crop.aspectRatio) return null
     if (crop.aspectRatio === 'original' && imageSource?.proxyBitmap) {
@@ -37,6 +38,11 @@ export function CropOverlay({ imageDisplay, containerRef }: CropOverlayProps) {
     if (w && h) return w / h
     return null
   }, [crop.aspectRatio, imageSource])
+
+  // Get the image's aspect ratio
+  const imageAspect = imageSource?.proxyBitmap
+    ? imageSource.proxyBitmap.width / imageSource.proxyBitmap.height
+    : 1
 
   const handleMouseDown = useCallback((e: React.MouseEvent, handle: HandleType) => {
     e.preventDefault()
@@ -102,19 +108,23 @@ export function CropOverlay({ imageDisplay, containerRef }: CropOverlayProps) {
       }
 
       // Maintain aspect ratio if set
+      // Note: We need to account for image dimensions since crop uses normalized coords
+      // targetAspect = (newWidth * imageWidth) / (newHeight * imageHeight)
+      // So: newWidth = newHeight * targetAspect / imageAspect
       if (aspectRatio) {
+        const normalizedRatio = aspectRatio / imageAspect
         if (['n', 's'].includes(dragging)) {
-          newWidth = newHeight * aspectRatio
+          newWidth = newHeight * normalizedRatio
         } else if (['e', 'w'].includes(dragging)) {
-          newHeight = newWidth / aspectRatio
+          newHeight = newWidth / normalizedRatio
         } else {
           // Corner handles - maintain aspect ratio based on which direction changed more
           const widthRatio = newWidth / startCropRef.current.width
           const heightRatio = newHeight / startCropRef.current.height
           if (Math.abs(widthRatio - 1) > Math.abs(heightRatio - 1)) {
-            newHeight = newWidth / aspectRatio
+            newHeight = newWidth / normalizedRatio
           } else {
-            newWidth = newHeight * aspectRatio
+            newWidth = newHeight * normalizedRatio
           }
         }
       }
@@ -127,7 +137,7 @@ export function CropOverlay({ imageDisplay, containerRef }: CropOverlayProps) {
     }
 
     setCrop({ x: newX, y: newY, width: newWidth, height: newHeight })
-  }, [dragging, containerRef, imageDisplay, setCrop, getAspectRatio])
+  }, [dragging, containerRef, imageDisplay, setCrop, getAspectRatio, imageAspect])
 
   const handleMouseUp = useCallback(() => {
     if (dragging) {
@@ -146,6 +156,66 @@ export function CropOverlay({ imageDisplay, containerRef }: CropOverlayProps) {
       }
     }
   }, [dragging, handleMouseMove, handleMouseUp])
+
+  // Apply aspect ratio immediately when it changes
+  useEffect(() => {
+    const aspectRatio = getAspectRatio()
+    if (!aspectRatio) return
+
+    // Calculate the normalized ratio (accounts for image aspect)
+    const normalizedRatio = aspectRatio / imageAspect
+
+    // Current crop dimensions
+    const { x, y, width, height } = crop
+
+    // Calculate the center of the current crop
+    const centerX = x + width / 2
+    const centerY = y + height / 2
+
+    // Calculate new dimensions that maintain the aspect ratio
+    // while staying as close to the current size as possible
+    let newWidth = width
+    let newHeight = height
+
+    // Current normalized aspect ratio of crop
+    const currentRatio = width / height
+
+    if (currentRatio > normalizedRatio) {
+      // Current crop is too wide, adjust width
+      newWidth = height * normalizedRatio
+    } else {
+      // Current crop is too tall, adjust height
+      newHeight = width / normalizedRatio
+    }
+
+    // Re-center the crop
+    let newX = centerX - newWidth / 2
+    let newY = centerY - newHeight / 2
+
+    // Constrain to image bounds
+    if (newX < 0) newX = 0
+    if (newY < 0) newY = 0
+    if (newX + newWidth > 1) newX = 1 - newWidth
+    if (newY + newHeight > 1) newY = 1 - newHeight
+
+    // Make sure crop still fits after adjustments
+    if (newWidth > 1) {
+      newWidth = 1
+      newHeight = newWidth / normalizedRatio
+      newX = 0
+    }
+    if (newHeight > 1) {
+      newHeight = 1
+      newWidth = newHeight * normalizedRatio
+      newY = 0
+    }
+
+    // Only update if significantly different
+    if (Math.abs(width - newWidth) > 0.001 || Math.abs(height - newHeight) > 0.001) {
+      setCrop({ x: newX, y: newY, width: newWidth, height: newHeight })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [crop.aspectRatio, getAspectRatio, imageAspect, setCrop]) // Intentionally exclude crop.x/y/width/height
 
   // Handle cursors for each resize handle
   const getCursor = (handle: HandleType): string => {
