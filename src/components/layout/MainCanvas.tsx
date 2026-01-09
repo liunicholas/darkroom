@@ -97,7 +97,21 @@ export function MainCanvas() {
     }
 
     const img = imageSource.proxyBitmap
-    const imgAspect = img.width / img.height
+
+    // When crop tool is active, show full image
+    // When crop is applied, use cropped region's aspect ratio
+    let imgAspect: number
+    if (activeTool === 'crop') {
+      // Show full image while editing crop
+      imgAspect = img.width / img.height
+    } else {
+      // Use cropped region's aspect ratio
+      // Cropped pixel dimensions: (crop.width * img.width) x (crop.height * img.height)
+      const croppedPixelWidth = crop.width * img.width
+      const croppedPixelHeight = crop.height * img.height
+      imgAspect = croppedPixelWidth / croppedPixelHeight
+    }
+
     const containerAspect = canvasSize.width / canvasSize.height
 
     let displayWidth: number
@@ -123,7 +137,7 @@ export function MainCanvas() {
     const y = (canvasSize.height - displayHeight) / 2 + panOffset.y
 
     return { x, y, width: displayWidth, height: displayHeight }
-  }, [imageSource, canvasSize, zoom, panOffset])
+  }, [imageSource, canvasSize, zoom, panOffset, activeTool, crop.width, crop.height])
 
   // Convert screen coordinates to image coordinates
   const screenToImage = useCallback((screenX: number, screenY: number): { x: number; y: number } | null => {
