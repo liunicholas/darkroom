@@ -14,6 +14,7 @@ interface ExportModalProps {
 
 type BrandType = 'fujifilm' | 'canon' | 'nikon' | 'sony' | 'leica'
 type ResolutionType = 'original' | '4k' | '2k' | '1080p' | 'instagram'
+type ExportMode = 'current' | 'all'
 
 export interface ExportOptions {
   format: 'jpeg' | 'png' | 'webp'
@@ -97,6 +98,133 @@ function calculateOutputDimensions(
     width: Math.round(originalWidth * scale),
     height: Math.round(originalHeight * scale),
   }
+}
+
+// Get export filename
+function getExportFileName(originalName: string, options: ExportOptions): string {
+  const baseName = originalName?.replace(/\.[^/.]+$/, '') || 'darkroom_export'
+  const resolutionSuffix = options.resolution !== 'original' ? `_${options.resolution}` : ''
+  return `${baseName}${resolutionSuffix}.${options.format}`
+}
+
+// Render a single image to blob
+async function renderImageToBlob(
+  fullBitmap: ImageBitmap,
+  editState: EditState,
+  options: ExportOptions,
+  loadedLogos: Record<string, HTMLImageElement>
+): Promise<Blob> {
+  const { width: outputWidth, height: outputHeight } = calculateOutputDimensions(
+    fullBitmap.width,
+    fullBitmap.height,
+    options.resolution
+  )
+
+  // Calculate border dimensions based on output size
+  const borderPx = options.addBorder ? Math.round(outputWidth * (options.borderWidth / 100)) : 0
+  const totalWidth = outputWidth + borderPx * 2
+  const totalHeight = outputHeight + borderPx * 2
+
+  // Create canvas for final output
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = totalWidth
+  outputCanvas.height = totalHeight
+
+  const ctx = outputCanvas.getContext('2d')!
+
+  // Fill background with border color
+  if (options.addBorder) {
+    ctx.fillStyle = options.borderColor
+    ctx.fillRect(0, 0, totalWidth, totalHeight)
+  }
+
+  // Render the image with WebGL at full resolution first
+  const renderCanvas = document.createElement('canvas')
+  renderCanvas.width = fullBitmap.width
+  renderCanvas.height = fullBitmap.height
+
+  const renderer = new WebGLRenderer(renderCanvas)
+  renderer.setImage(fullBitmap)
+  renderer.render(editState)
+
+  // Draw rendered image onto output canvas (scaled if needed)
+  ctx.drawImage(renderCanvas, 0, 0, fullBitmap.width, fullBitmap.height, borderPx, borderPx, outputWidth, outputHeight)
+  renderer.dispose()
+
+  // Add logo on the BORDER ONLY (below the image)
+  if (options.addText && options.addBorder && borderPx > 0) {
+    const baseLogoHeight = borderPx * 0.6
+    const sizeMultiplier = options.textSize === 'small' ? 0.7 : options.textSize === 'large' ? 1.3 : 1
+    const logoHeight = Math.max(12, Math.round(baseLogoHeight * sizeMultiplier))
+
+    if (options.textMode === 'logo' && loadedLogos[options.selectedBrand]) {
+      const logoImg = loadedLogos[options.selectedBrand]
+      const logoWidth = (logoImg.naturalWidth / logoImg.naturalHeight) * logoHeight
+
+      // Y position: center in bottom border
+      const y = outputHeight + borderPx + (borderPx - logoHeight) / 2
+
+      // X position based on alignment
+      let x: number
+      const padding = logoHeight * 0.3
+      switch (options.textPosition) {
+        case 'bottom-left':
+          x = borderPx + padding
+          break
+        case 'bottom-center':
+          x = (totalWidth - logoWidth) / 2
+          break
+        case 'bottom-right':
+        default:
+          x = totalWidth - borderPx - logoWidth - padding
+          break
+      }
+
+      // Draw logo directly
+      ctx.drawImage(logoImg, x, y, logoWidth, logoHeight)
+    } else if (options.textMode === 'custom' && options.customText) {
+      const fontSize = logoHeight
+      ctx.font = `bold ${fontSize}px "Instrument Serif", Georgia, serif`
+      ctx.fillStyle = options.textColor
+      ctx.textBaseline = 'middle'
+
+      const y = outputHeight + borderPx + borderPx / 2
+      const padding = fontSize * 0.3
+
+      let x: number
+      switch (options.textPosition) {
+        case 'bottom-left':
+          ctx.textAlign = 'left'
+          x = borderPx + padding
+          break
+        case 'bottom-center':
+          ctx.textAlign = 'center'
+          x = totalWidth / 2
+          break
+        case 'bottom-right':
+        default:
+          ctx.textAlign = 'right'
+          x = totalWidth - borderPx - padding
+          break
+      }
+
+      ctx.fillText(options.customText, x, y)
+    }
+  }
+
+  // Export to blob - fixed quality at 92%
+  const mimeType = options.format === 'jpeg' ? 'image/jpeg' : options.format === 'png' ? 'image/png' : 'image/webp'
+  const quality = options.format === 'png' ? undefined : 0.92
+
+  return new Promise((resolve, reject) => {
+    outputCanvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob)
+      } else {
+        reject(new Error('Failed to create blob'))
+      }
+    }, mimeType, quality)
+  })
 }
 
 interface PreviewProps {
@@ -283,9 +411,52 @@ function ExportPreview({ options, imageSource, editState }: PreviewProps) {
   )
 }
 
+// Batch export preview - shows thumbnail grid
+function BatchExportPreview({ images }: { images: { thumbnail: string | null; fileName: string }[] }) {
+  const displayImages = images.slice(0, 12)
+  const remainingCount = images.length - 12
+
+  return (
+    <div className="p-4 bg-dark-800/50 rounded-lg border border-dark-600">
+      <div className="grid grid-cols-6 gap-2 mb-3">
+        {displayImages.map((img, i) => (
+          <div
+            key={i}
+            className="aspect-square rounded overflow-hidden bg-dark-700"
+          >
+            {img.thumbnail ? (
+              <img
+                src={img.thumbnail}
+                alt={img.fileName}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <svg className="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {remainingCount > 0 && (
+        <p className="text-xs text-gray-500 text-center">
+          +{remainingCount} more image{remainingCount > 1 ? 's' : ''}
+        </p>
+      )}
+      <p className="text-xs text-gray-400 text-center mt-2">
+        {images.length} image{images.length > 1 ? 's' : ''} will be exported with their individual edits
+      </p>
+    </div>
+  )
+}
+
 export function ExportModal({ isOpen, onClose }: ExportModalProps) {
   const [options, setOptions] = useState<ExportOptions>(DEFAULT_OPTIONS)
+  const [exportMode, setExportMode] = useState<ExportMode>('current')
   const [isExporting, setIsExporting] = useState(false)
+  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0 })
   const [loadedLogos, setLoadedLogos] = useState<Record<string, HTMLImageElement>>({})
 
   const imageSource = useEditorStore((state) => state.imageSource)
@@ -295,7 +466,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
 
   const currentImage = images[currentImageIndex]
 
-  // Calculate output dimensions
+  // Calculate output dimensions for current image
   const outputDimensions = imageSource
     ? calculateOutputDimensions(imageSource.originalWidth, imageSource.originalHeight, options.resolution)
     : null
@@ -345,137 +516,143 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
     }
   }, [options.addText])
 
-  const handleExport = useCallback(async () => {
-    if (!imageSource?.fullBitmap || !outputDimensions) return
+  // Export single image
+  const handleExportSingle = useCallback(async () => {
+    if (!imageSource?.fullBitmap) return
 
     setIsExporting(true)
 
     try {
-      const img = imageSource.fullBitmap
-      const { width: outputWidth, height: outputHeight } = outputDimensions
+      const blob = await renderImageToBlob(
+        imageSource.fullBitmap,
+        editState,
+        options,
+        loadedLogos
+      )
 
-      // Calculate border dimensions based on output size
-      const borderPx = options.addBorder ? Math.round(outputWidth * (options.borderWidth / 100)) : 0
-      const totalWidth = outputWidth + borderPx * 2
-      const totalHeight = outputHeight + borderPx * 2
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = getExportFileName(currentImage?.fileName || 'image', options)
+      a.click()
+      URL.revokeObjectURL(url)
 
-      // Create canvas for final output
-      const outputCanvas = document.createElement('canvas')
-      outputCanvas.width = totalWidth
-      outputCanvas.height = totalHeight
-
-      const ctx = outputCanvas.getContext('2d')!
-
-      // Fill background with border color
-      if (options.addBorder) {
-        ctx.fillStyle = options.borderColor
-        ctx.fillRect(0, 0, totalWidth, totalHeight)
-      }
-
-      // Render the image with WebGL at full resolution first
-      const renderCanvas = document.createElement('canvas')
-      renderCanvas.width = img.width
-      renderCanvas.height = img.height
-
-      const renderer = new WebGLRenderer(renderCanvas)
-      renderer.setImage(img)
-      renderer.render(editState)
-
-      // Draw rendered image onto output canvas (scaled if needed)
-      ctx.drawImage(renderCanvas, 0, 0, img.width, img.height, borderPx, borderPx, outputWidth, outputHeight)
-      renderer.dispose()
-
-      // Add logo on the BORDER ONLY (below the image)
-      if (options.addText && options.addBorder && borderPx > 0) {
-        const baseLogoHeight = borderPx * 0.6
-        const sizeMultiplier = options.textSize === 'small' ? 0.7 : options.textSize === 'large' ? 1.3 : 1
-        const logoHeight = Math.max(12, Math.round(baseLogoHeight * sizeMultiplier))
-
-        if (options.textMode === 'logo' && loadedLogos[options.selectedBrand]) {
-          const logoImg = loadedLogos[options.selectedBrand]
-          const logoWidth = (logoImg.naturalWidth / logoImg.naturalHeight) * logoHeight
-
-          // Y position: center in bottom border
-          const y = outputHeight + borderPx + (borderPx - logoHeight) / 2
-
-          // X position based on alignment
-          let x: number
-          const padding = logoHeight * 0.3
-          switch (options.textPosition) {
-            case 'bottom-left':
-              x = borderPx + padding
-              break
-            case 'bottom-center':
-              x = (totalWidth - logoWidth) / 2
-              break
-            case 'bottom-right':
-            default:
-              x = totalWidth - borderPx - logoWidth - padding
-              break
-          }
-
-          // Draw logo directly
-          ctx.drawImage(logoImg, x, y, logoWidth, logoHeight)
-        } else if (options.textMode === 'custom' && options.customText) {
-          const fontSize = logoHeight
-          ctx.font = `bold ${fontSize}px "Instrument Serif", Georgia, serif`
-          ctx.fillStyle = options.textColor
-          ctx.textBaseline = 'middle'
-
-          const y = outputHeight + borderPx + borderPx / 2
-          const padding = fontSize * 0.3
-
-          let x: number
-          switch (options.textPosition) {
-            case 'bottom-left':
-              ctx.textAlign = 'left'
-              x = borderPx + padding
-              break
-            case 'bottom-center':
-              ctx.textAlign = 'center'
-              x = totalWidth / 2
-              break
-            case 'bottom-right':
-            default:
-              ctx.textAlign = 'right'
-              x = totalWidth - borderPx - padding
-              break
-          }
-
-          ctx.fillText(options.customText, x, y)
-        }
-      }
-
-      // Export to blob - fixed quality at 92%
-      const mimeType = options.format === 'jpeg' ? 'image/jpeg' : options.format === 'png' ? 'image/png' : 'image/webp'
-      const quality = options.format === 'png' ? undefined : 0.92
-
-      outputCanvas.toBlob((blob) => {
-        if (blob) {
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-
-          const baseName = currentImage?.fileName?.replace(/\.[^/.]+$/, '') || 'darkroom_export'
-          const resolutionSuffix = options.resolution !== 'original' ? `_${options.resolution}` : ''
-          a.download = `${baseName}${resolutionSuffix}.${options.format}`
-          a.click()
-          URL.revokeObjectURL(url)
-        }
-        setIsExporting(false)
-        onClose()
-      }, mimeType, quality)
+      setIsExporting(false)
+      onClose()
     } catch (error) {
       console.error('Export failed:', error)
       setIsExporting(false)
     }
-  }, [imageSource, editState, options, currentImage, onClose, loadedLogos, outputDimensions])
+  }, [imageSource, editState, options, currentImage, onClose, loadedLogos])
+
+  // Export all images as ZIP
+  const handleExportAll = useCallback(async () => {
+    if (images.length === 0) return
+
+    setIsExporting(true)
+    setExportProgress({ current: 0, total: images.length })
+
+    try {
+      // Dynamically import JSZip
+      const JSZip = (await import('jszip')).default
+      const zip = new JSZip()
+      const folder = zip.folder('darkroom_export')!
+
+      for (let i = 0; i < images.length; i++) {
+        const image = images[i]
+
+        if (!image.fullBitmap) {
+          console.warn(`Skipping image ${image.fileName} - no fullBitmap`)
+          continue
+        }
+
+        // Render image with its own editState
+        const blob = await renderImageToBlob(
+          image.fullBitmap,
+          image.editState,
+          options,
+          loadedLogos
+        )
+
+        // Add to ZIP with original filename
+        const fileName = getExportFileName(image.fileName, options)
+        folder.file(fileName, blob)
+
+        setExportProgress({ current: i + 1, total: images.length })
+      }
+
+      // Generate and download ZIP
+      const zipBlob = await zip.generateAsync({ type: 'blob' })
+      const url = URL.createObjectURL(zipBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'darkroom_export.zip'
+      a.click()
+      URL.revokeObjectURL(url)
+
+      setIsExporting(false)
+      setExportProgress({ current: 0, total: 0 })
+      onClose()
+    } catch (error) {
+      console.error('Batch export failed:', error)
+      setIsExporting(false)
+      setExportProgress({ current: 0, total: 0 })
+    }
+  }, [images, options, loadedLogos, onClose])
+
+  const handleExport = exportMode === 'current' ? handleExportSingle : handleExportAll
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Export" size="lg">
       <div className="space-y-6">
-        {/* Live Preview */}
-        <ExportPreview options={options} imageSource={imageSource} editState={editState} />
+        {/* Export Mode Tabs */}
+        {images.length > 1 && (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setExportMode('current')}
+              className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
+                exportMode === 'current'
+                  ? 'bg-accent text-white'
+                  : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
+              }`}
+            >
+              Current Image
+            </button>
+            <button
+              onClick={() => setExportMode('all')}
+              className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-lg transition-colors ${
+                exportMode === 'all'
+                  ? 'bg-accent text-white'
+                  : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
+              }`}
+            >
+              All Images ({images.length})
+            </button>
+          </div>
+        )}
+
+        {/* Preview */}
+        {exportMode === 'current' ? (
+          <ExportPreview options={options} imageSource={imageSource} editState={editState} />
+        ) : (
+          <BatchExportPreview images={images} />
+        )}
+
+        {/* Progress bar for batch export */}
+        {isExporting && exportMode === 'all' && exportProgress.total > 0 && (
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs text-gray-400">
+              <span>Exporting {exportProgress.current} of {exportProgress.total} images...</span>
+              <span>{Math.round((exportProgress.current / exportProgress.total) * 100)}%</span>
+            </div>
+            <div className="h-2 bg-dark-700 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent transition-all duration-300"
+                style={{ width: `${(exportProgress.current / exportProgress.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Format */}
         <div>
@@ -489,7 +666,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                 onClick={() => setOptions({ ...options, format: fmt })}
                 className={`px-4 py-2 text-sm rounded-lg transition-colors ${
                   options.format === fmt
-                    ? 'bg-maroon text-white'
+                    ? 'bg-accent text-white'
                     : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
                 }`}
               >
@@ -512,7 +689,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                   onClick={() => setOptions({ ...options, resolution: preset.value })}
                   className={`px-4 py-2 text-sm rounded-lg transition-colors ${
                     options.resolution === preset.value
-                      ? 'bg-maroon text-white'
+                      ? 'bg-accent text-white'
                       : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
                   }`}
                 >
@@ -520,7 +697,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                 </button>
               ))}
             </div>
-            {outputDimensions && (
+            {exportMode === 'current' && outputDimensions && (
               <p className="text-xs text-gray-500">
                 {outputDimensions.width} x {outputDimensions.height} px
               </p>
@@ -539,7 +716,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                 type="checkbox"
                 checked={options.addBorder}
                 onChange={(e) => handleBorderToggle(e.target.checked)}
-                className="w-4 h-4 rounded border-dark-500 text-maroon focus:ring-maroon bg-dark-700"
+                className="w-4 h-4 rounded border-dark-500 text-accent focus:ring-accent bg-dark-700"
               />
               <span className="text-sm text-gray-300">Add border</span>
             </label>
@@ -583,7 +760,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                 type="checkbox"
                 checked={options.addText}
                 onChange={(e) => handleTextToggle(e.target.checked)}
-                className="w-4 h-4 rounded border-dark-500 text-maroon focus:ring-maroon bg-dark-700"
+                className="w-4 h-4 rounded border-dark-500 text-accent focus:ring-accent bg-dark-700"
               />
               <span className="text-sm text-gray-300">Add watermark</span>
               {options.addText && (
@@ -599,7 +776,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                     onClick={() => setOptions({ ...options, textMode: 'logo' })}
                     className={`px-4 py-2 text-sm rounded-lg transition-colors ${
                       options.textMode === 'logo'
-                        ? 'bg-maroon text-white'
+                        ? 'bg-accent text-white'
                         : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
                     }`}
                   >
@@ -609,7 +786,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                     onClick={() => setOptions({ ...options, textMode: 'custom' })}
                     className={`px-4 py-2 text-sm rounded-lg transition-colors ${
                       options.textMode === 'custom'
-                        ? 'bg-maroon text-white'
+                        ? 'bg-accent text-white'
                         : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
                     }`}
                   >
@@ -626,7 +803,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                         onClick={() => setOptions({ ...options, selectedBrand: brand })}
                         className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
                           options.selectedBrand === brand
-                            ? 'bg-maroon text-white'
+                            ? 'bg-accent text-white'
                             : 'bg-dark-700 text-gray-300 hover:bg-dark-600'
                         }`}
                       >
@@ -641,7 +818,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                       value={options.customText}
                       onChange={(e) => setOptions({ ...options, customText: e.target.value })}
                       placeholder="Enter your text..."
-                      className="w-full px-3 py-2 bg-dark-700 border border-dark-500 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-maroon"
+                      className="w-full px-3 py-2 bg-dark-700 border border-dark-500 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-accent"
                     />
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-gray-400">Color</span>
@@ -662,7 +839,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                     <select
                       value={options.textPosition}
                       onChange={(e) => setOptions({ ...options, textPosition: e.target.value as ExportOptions['textPosition'] })}
-                      className="px-3 py-2 bg-dark-700 border border-dark-500 rounded-lg text-sm text-white focus:outline-none focus:border-maroon"
+                      className="px-3 py-2 bg-dark-700 border border-dark-500 rounded-lg text-sm text-white focus:outline-none focus:border-accent"
                     >
                       <option value="bottom-left">Bottom Left</option>
                       <option value="bottom-center">Bottom Center</option>
@@ -674,7 +851,7 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                     <select
                       value={options.textSize}
                       onChange={(e) => setOptions({ ...options, textSize: e.target.value as ExportOptions['textSize'] })}
-                      className="px-3 py-2 bg-dark-700 border border-dark-500 rounded-lg text-sm text-white focus:outline-none focus:border-maroon"
+                      className="px-3 py-2 bg-dark-700 border border-dark-500 rounded-lg text-sm text-white focus:outline-none focus:border-accent"
                     >
                       <option value="small">Small</option>
                       <option value="medium">Medium</option>
@@ -699,10 +876,10 @@ export function ExportModal({ isOpen, onClose }: ExportModalProps) {
                   <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" className="opacity-25" />
                   <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75" />
                 </svg>
-                Exporting...
+                {exportMode === 'all' ? 'Exporting...' : 'Exporting...'}
               </span>
             ) : (
-              'Export'
+              exportMode === 'all' ? 'Export All' : 'Export'
             )}
           </Button>
         </div>

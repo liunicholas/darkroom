@@ -65,7 +65,7 @@ export function Modal({ isOpen, onClose, title, children, size = 'md' }: ModalPr
         {/* Header */}
         {title && (
           <div className="flex items-center justify-between px-5 py-4 border-b border-dark-600">
-            <h2 className="text-lg font-display font-medium text-white">{title}</h2>
+            <h2 className="text-xs font-medium text-white uppercase tracking-wide">{title}</h2>
             <button
               onClick={onClose}
               className="w-8 h-8 rounded-lg bg-dark-700 hover:bg-dark-600 flex items-center justify-center text-gray-400 hover:text-white transition-colors"
