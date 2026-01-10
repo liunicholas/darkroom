@@ -77,7 +77,7 @@ export function LeftPanel() {
     <div className="w-64 bg-dark-800 border-r border-dark-400 flex flex-col shrink-0">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-dark-400">
-        <h2 className="text-sm font-display font-medium text-white">Presets</h2>
+        <h2 className="text-xs font-medium text-white uppercase tracking-wide">Presets</h2>
         <button
           onClick={() => setIsCollapsed(true)}
           className="p-1 text-gray-400 hover:text-white hover:bg-dark-600 rounded"

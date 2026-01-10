@@ -3,6 +3,7 @@ import { immer } from 'zustand/middleware/immer'
 import type {
   EditState,
   ImageSource,
+  ImageItem,
   BasicAdjustments,
   ToneCurveState,
   HSLAdjustments,
@@ -103,16 +104,21 @@ const DEFAULT_BRUSH_SETTINGS: BrushSettings = {
   mode: 'add',
 }
 
+// Helper to create default edit state
+const createDefaultEditState = (): EditState => JSON.parse(JSON.stringify(DEFAULT_EDIT_STATE))
+
 // Store interface
 interface EditorStore {
-  // Image
+  // Multi-image support
+  images: ImageItem[]
+  currentImageIndex: number
+  isLoadingImages: boolean
+  loadingProgress: { current: number; total: number }
+
+  // Legacy single-image compatibility (computed from current image)
   imageSource: ImageSource | null
   isLoading: boolean
-
-  // Edit state
   editState: EditState
-
-  // History
   history: HistoryEntry[]
   historyIndex: number
   maxHistory: number
@@ -128,9 +134,20 @@ interface EditorStore {
   beforeAfterMode: 'split' | 'toggle'
   zoom: number
   panOffset: { x: number; y: number }
+  showFilmstrip: boolean
 
-  // Actions
+  // Multi-image actions
   loadImage: (file: File) => Promise<void>
+  loadImages: (files: File[]) => Promise<void>
+  removeImage: (index: number) => void
+  clearAllImages: () => void
+  setCurrentImage: (index: number) => void
+  nextImage: () => void
+  previousImage: () => void
+  getCurrentImage: () => ImageItem | null
+  setImageRating: (index: number, rating: number) => void
+
+  // Legacy actions
   resetImage: () => void
 
   // Basic adjustments
@@ -186,6 +203,7 @@ interface EditorStore {
   setPanOffset: (offset: { x: number; y: number }) => void
   toggleHistogram: () => void
   toggleBeforeAfter: () => void
+  toggleFilmstrip: () => void
 
   // Reset
   resetAllEdits: () => void
@@ -196,14 +214,79 @@ interface EditorStore {
 
 // Max dimension for proxy image
 const MAX_PROXY_DIMENSION = 2048
+const THUMBNAIL_SIZE = 120
+
+// Helper to generate thumbnail
+async function generateThumbnail(bitmap: ImageBitmap): Promise<string> {
+  const aspect = bitmap.width / bitmap.height
+  const width = aspect >= 1 ? THUMBNAIL_SIZE : Math.round(THUMBNAIL_SIZE * aspect)
+  const height = aspect >= 1 ? Math.round(THUMBNAIL_SIZE / aspect) : THUMBNAIL_SIZE
+
+  const canvas = new OffscreenCanvas(width, height)
+  const ctx = canvas.getContext('2d')!
+  ctx.drawImage(bitmap, 0, 0, width, height)
+
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.7 })
+  return new Promise((resolve) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result as string)
+    reader.readAsDataURL(blob)
+  })
+}
+
+// Helper to process a single image file
+async function processImageFile(file: File): Promise<Omit<ImageItem, 'id'>> {
+  const fullBitmap = await createImageBitmap(file)
+  const { width, height } = fullBitmap
+
+  // Calculate proxy dimensions
+  const scale = Math.min(1, MAX_PROXY_DIMENSION / Math.max(width, height))
+  const proxyWidth = Math.round(width * scale)
+  const proxyHeight = Math.round(height * scale)
+
+  // Create proxy bitmap
+  let proxyBitmap: ImageBitmap
+  if (scale < 1) {
+    const canvas = new OffscreenCanvas(proxyWidth, proxyHeight)
+    const ctx = canvas.getContext('2d')!
+    ctx.drawImage(fullBitmap, 0, 0, proxyWidth, proxyHeight)
+    proxyBitmap = await createImageBitmap(canvas)
+  } else {
+    proxyBitmap = fullBitmap
+  }
+
+  // Generate thumbnail
+  const thumbnail = await generateThumbnail(proxyBitmap)
+
+  return {
+    file,
+    fileName: file.name,
+    originalWidth: width,
+    originalHeight: height,
+    proxyBitmap,
+    fullBitmap,
+    thumbnail,
+    editState: createDefaultEditState(),
+    history: [],
+    historyIndex: -1,
+    isLoading: false,
+    rating: 0,
+  }
+}
 
 // Create store
 export const useEditorStore = create<EditorStore>()(
   immer((set, get) => ({
-    // Initial state
+    // Multi-image state
+    images: [],
+    currentImageIndex: -1,
+    isLoadingImages: false,
+    loadingProgress: { current: 0, total: 0 },
+
+    // Computed legacy compatibility (updated via sync)
     imageSource: null,
     isLoading: false,
-    editState: { ...DEFAULT_EDIT_STATE },
+    editState: createDefaultEditState(),
     history: [],
     historyIndex: -1,
     maxHistory: 50,
@@ -215,46 +298,50 @@ export const useEditorStore = create<EditorStore>()(
     beforeAfterMode: 'split',
     zoom: 1,
     panOffset: { x: 0, y: 0 },
+    showFilmstrip: true,
 
-    // Load image
+    // Get current image helper
+    getCurrentImage: () => {
+      const { images, currentImageIndex } = get()
+      if (currentImageIndex >= 0 && currentImageIndex < images.length) {
+        return images[currentImageIndex]
+      }
+      return null
+    },
+
+    // Load single image
     loadImage: async (file: File) => {
       set((state) => {
         state.isLoading = true
+        state.isLoadingImages = true
       })
 
       try {
-        // Create bitmap from file
-        const fullBitmap = await createImageBitmap(file)
-        const { width, height } = fullBitmap
-
-        // Calculate proxy dimensions
-        const scale = Math.min(1, MAX_PROXY_DIMENSION / Math.max(width, height))
-        const proxyWidth = Math.round(width * scale)
-        const proxyHeight = Math.round(height * scale)
-
-        // Create proxy bitmap
-        let proxyBitmap: ImageBitmap
-        if (scale < 1) {
-          const canvas = new OffscreenCanvas(proxyWidth, proxyHeight)
-          const ctx = canvas.getContext('2d')!
-          ctx.drawImage(fullBitmap, 0, 0, proxyWidth, proxyHeight)
-          proxyBitmap = await createImageBitmap(canvas)
-        } else {
-          proxyBitmap = fullBitmap
+        const imageData = await processImageFile(file)
+        const newImage: ImageItem = {
+          ...imageData,
+          id: `img-${Date.now()}`,
         }
 
         set((state) => {
+          state.images.push(newImage)
+          state.currentImageIndex = state.images.length - 1
+
+          // Sync legacy state
           state.imageSource = {
-            file,
-            originalWidth: width,
-            originalHeight: height,
-            proxyBitmap,
-            fullBitmap,
+            file: newImage.file,
+            originalWidth: newImage.originalWidth,
+            originalHeight: newImage.originalHeight,
+            proxyBitmap: newImage.proxyBitmap,
+            fullBitmap: newImage.fullBitmap,
           }
-          state.editState = { ...DEFAULT_EDIT_STATE }
-          state.history = []
-          state.historyIndex = -1
+          state.editState = newImage.editState
+          state.history = newImage.history
+          state.historyIndex = newImage.historyIndex
           state.isLoading = false
+          state.isLoadingImages = false
+          state.zoom = 1
+          state.panOffset = { x: 0, y: 0 }
         })
 
         // Push initial history
@@ -263,14 +350,219 @@ export const useEditorStore = create<EditorStore>()(
         console.error('Failed to load image:', error)
         set((state) => {
           state.isLoading = false
+          state.isLoadingImages = false
         })
       }
     },
 
+    // Load multiple images (from folder)
+    loadImages: async (files: File[]) => {
+      if (files.length === 0) return
+
+      set((state) => {
+        state.isLoadingImages = true
+        state.loadingProgress = { current: 0, total: files.length }
+      })
+
+      try {
+        const newImages: ImageItem[] = []
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i]
+          try {
+            const imageData = await processImageFile(file)
+            const newImage: ImageItem = {
+              ...imageData,
+              id: `img-${Date.now()}-${i}`,
+            }
+            newImages.push(newImage)
+
+            // Push initial history for each image
+            newImage.history.push({
+              editState: JSON.parse(JSON.stringify(newImage.editState)),
+              label: 'Open image',
+              timestamp: Date.now(),
+            })
+            newImage.historyIndex = 0
+
+            set((state) => {
+              state.loadingProgress.current = i + 1
+            })
+          } catch (error) {
+            console.error(`Failed to load image ${file.name}:`, error)
+          }
+        }
+
+        if (newImages.length > 0) {
+          set((state) => {
+            state.images = [...state.images, ...newImages]
+
+            // If no current image, select the first new one
+            if (state.currentImageIndex === -1) {
+              state.currentImageIndex = state.images.length - newImages.length
+            }
+
+            // Sync legacy state with current image
+            const currentImg = state.images[state.currentImageIndex]
+            if (currentImg) {
+              state.imageSource = {
+                file: currentImg.file,
+                originalWidth: currentImg.originalWidth,
+                originalHeight: currentImg.originalHeight,
+                proxyBitmap: currentImg.proxyBitmap,
+                fullBitmap: currentImg.fullBitmap,
+              }
+              state.editState = currentImg.editState
+              state.history = currentImg.history
+              state.historyIndex = currentImg.historyIndex
+            }
+
+            state.isLoadingImages = false
+            state.zoom = 1
+            state.panOffset = { x: 0, y: 0 }
+          })
+        } else {
+          set((state) => {
+            state.isLoadingImages = false
+          })
+        }
+      } catch (error) {
+        console.error('Failed to load images:', error)
+        set((state) => {
+          state.isLoadingImages = false
+        })
+      }
+    },
+
+    // Remove image
+    removeImage: (index: number) => {
+      set((state) => {
+        if (index < 0 || index >= state.images.length) return
+
+        state.images.splice(index, 1)
+
+        // Adjust current index
+        if (state.images.length === 0) {
+          state.currentImageIndex = -1
+          state.imageSource = null
+          state.editState = createDefaultEditState()
+          state.history = []
+          state.historyIndex = -1
+        } else if (state.currentImageIndex >= state.images.length) {
+          state.currentImageIndex = state.images.length - 1
+        } else if (index < state.currentImageIndex) {
+          state.currentImageIndex--
+        }
+
+        // Sync if images remain
+        if (state.currentImageIndex >= 0) {
+          const currentImg = state.images[state.currentImageIndex]
+          state.imageSource = {
+            file: currentImg.file,
+            originalWidth: currentImg.originalWidth,
+            originalHeight: currentImg.originalHeight,
+            proxyBitmap: currentImg.proxyBitmap,
+            fullBitmap: currentImg.fullBitmap,
+          }
+          state.editState = currentImg.editState
+          state.history = currentImg.history
+          state.historyIndex = currentImg.historyIndex
+        }
+      })
+    },
+
+    // Clear all images
+    clearAllImages: () => {
+      set((state) => {
+        state.images = []
+        state.currentImageIndex = -1
+        state.imageSource = null
+        state.editState = createDefaultEditState()
+        state.history = []
+        state.historyIndex = -1
+      })
+    },
+
+    // Set current image
+    setCurrentImage: (index: number) => {
+      set((state) => {
+        if (index < 0 || index >= state.images.length) return
+
+        // Save current image's state before switching
+        if (state.currentImageIndex >= 0 && state.currentImageIndex < state.images.length) {
+          const currentImg = state.images[state.currentImageIndex]
+          currentImg.editState = JSON.parse(JSON.stringify(state.editState))
+          currentImg.history = state.history
+          currentImg.historyIndex = state.historyIndex
+        }
+
+        state.currentImageIndex = index
+        const newImg = state.images[index]
+
+        // Sync legacy state
+        state.imageSource = {
+          file: newImg.file,
+          originalWidth: newImg.originalWidth,
+          originalHeight: newImg.originalHeight,
+          proxyBitmap: newImg.proxyBitmap,
+          fullBitmap: newImg.fullBitmap,
+        }
+        state.editState = newImg.editState
+        state.history = newImg.history
+        state.historyIndex = newImg.historyIndex
+        state.zoom = 1
+        state.panOffset = { x: 0, y: 0 }
+      })
+    },
+
+    // Next image
+    nextImage: () => {
+      const { images, currentImageIndex, setCurrentImage } = get()
+      if (currentImageIndex < images.length - 1) {
+        setCurrentImage(currentImageIndex + 1)
+      }
+    },
+
+    // Previous image
+    previousImage: () => {
+      const { currentImageIndex, setCurrentImage } = get()
+      if (currentImageIndex > 0) {
+        setCurrentImage(currentImageIndex - 1)
+      }
+    },
+
+    // Set image rating
+    setImageRating: (index: number, rating: number) => {
+      set((state) => {
+        if (index >= 0 && index < state.images.length) {
+          state.images[index].rating = Math.max(0, Math.min(5, rating))
+        }
+      })
+    },
+
     resetImage: () => {
       set((state) => {
-        state.imageSource = null
-        state.editState = { ...DEFAULT_EDIT_STATE }
+        if (state.currentImageIndex >= 0) {
+          state.images.splice(state.currentImageIndex, 1)
+          if (state.images.length === 0) {
+            state.currentImageIndex = -1
+            state.imageSource = null
+          } else if (state.currentImageIndex >= state.images.length) {
+            state.currentImageIndex = state.images.length - 1
+            const img = state.images[state.currentImageIndex]
+            state.imageSource = {
+              file: img.file,
+              originalWidth: img.originalWidth,
+              originalHeight: img.originalHeight,
+              proxyBitmap: img.proxyBitmap,
+              fullBitmap: img.fullBitmap,
+            }
+            state.editState = img.editState
+            state.history = img.history
+            state.historyIndex = img.historyIndex
+          }
+        }
+        state.editState = createDefaultEditState()
         state.history = []
         state.historyIndex = -1
       })
@@ -280,12 +572,19 @@ export const useEditorStore = create<EditorStore>()(
     setBasicAdjustment: (key, value) => {
       set((state) => {
         state.editState.basic[key] = value
+        // Sync to current image
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.basic[key] = value
+        }
       })
     },
 
     resetBasicAdjustments: () => {
       set((state) => {
         state.editState.basic = { ...DEFAULT_BASIC }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.basic = { ...DEFAULT_BASIC }
+        }
       })
       get().pushHistory('Reset basic adjustments')
     },
@@ -294,6 +593,9 @@ export const useEditorStore = create<EditorStore>()(
     setToneCurvePoints: (channel, points) => {
       set((state) => {
         state.editState.toneCurve[channel] = points
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.toneCurve[channel] = points
+        }
       })
     },
 
@@ -305,6 +607,14 @@ export const useEditorStore = create<EditorStore>()(
           green: [...DEFAULT_CURVE],
           blue: [...DEFAULT_CURVE],
         }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.toneCurve = {
+            rgb: [...DEFAULT_CURVE],
+            red: [...DEFAULT_CURVE],
+            green: [...DEFAULT_CURVE],
+            blue: [...DEFAULT_CURVE],
+          }
+        }
       })
       get().pushHistory('Reset tone curve')
     },
@@ -313,12 +623,18 @@ export const useEditorStore = create<EditorStore>()(
     setHSLValue: (color, type, value) => {
       set((state) => {
         state.editState.hsl[color][type] = value
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.hsl[color][type] = value
+        }
       })
     },
 
     resetHSL: () => {
       set((state) => {
         state.editState.hsl = { ...DEFAULT_HSL }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.hsl = { ...DEFAULT_HSL }
+        }
       })
       get().pushHistory('Reset HSL')
     },
@@ -329,8 +645,15 @@ export const useEditorStore = create<EditorStore>()(
         if (wheel === 'blending' || wheel === 'balance') {
           // @ts-ignore - these are numbers
           state.editState.colorGrading[wheel] = value as number
+          if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+            // @ts-ignore
+            state.images[state.currentImageIndex].editState.colorGrading[wheel] = value as number
+          }
         } else {
           Object.assign(state.editState.colorGrading[wheel], value)
+          if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+            Object.assign(state.images[state.currentImageIndex].editState.colorGrading[wheel], value)
+          }
         }
       })
     },
@@ -338,6 +661,9 @@ export const useEditorStore = create<EditorStore>()(
     resetColorGrading: () => {
       set((state) => {
         state.editState.colorGrading = { ...DEFAULT_COLOR_GRADING }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.colorGrading = { ...DEFAULT_COLOR_GRADING }
+        }
       })
       get().pushHistory('Reset color grading')
     },
@@ -346,18 +672,27 @@ export const useEditorStore = create<EditorStore>()(
     setVignette: (key, value) => {
       set((state) => {
         state.editState.effects.vignette[key] = value
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.effects.vignette[key] = value
+        }
       })
     },
 
     setGrain: (key, value) => {
       set((state) => {
         state.editState.effects.grain[key] = value
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.effects.grain[key] = value
+        }
       })
     },
 
     resetEffects: () => {
       set((state) => {
         state.editState.effects = { ...DEFAULT_EFFECTS }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.effects = { ...DEFAULT_EFFECTS }
+        }
       })
       get().pushHistory('Reset effects')
     },
@@ -366,18 +701,27 @@ export const useEditorStore = create<EditorStore>()(
     setSharpening: (key, value) => {
       set((state) => {
         state.editState.detail.sharpening[key] = value
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.detail.sharpening[key] = value
+        }
       })
     },
 
     setNoiseReduction: (key, value) => {
       set((state) => {
         state.editState.detail.noiseReduction[key] = value
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.detail.noiseReduction[key] = value
+        }
       })
     },
 
     resetDetail: () => {
       set((state) => {
         state.editState.detail = { ...DEFAULT_DETAIL }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.detail = { ...DEFAULT_DETAIL }
+        }
       })
       get().pushHistory('Reset detail')
     },
@@ -386,12 +730,18 @@ export const useEditorStore = create<EditorStore>()(
     setCrop: (crop) => {
       set((state) => {
         Object.assign(state.editState.crop, crop)
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          Object.assign(state.images[state.currentImageIndex].editState.crop, crop)
+        }
       })
     },
 
     resetCrop: () => {
       set((state) => {
         state.editState.crop = { ...DEFAULT_CROP }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.crop = { ...DEFAULT_CROP }
+        }
       })
       get().pushHistory('Reset crop')
     },
@@ -400,7 +750,7 @@ export const useEditorStore = create<EditorStore>()(
     addMask: (type) => {
       const id = `mask-${Date.now()}`
       set((state) => {
-        state.editState.masks.push({
+        const newMask: MaskLayer = {
           id,
           name: `Mask ${state.editState.masks.length + 1}`,
           type,
@@ -409,8 +759,13 @@ export const useEditorStore = create<EditorStore>()(
           feather: 0,
           inverted: false,
           adjustments: {},
-        })
+        }
+        state.editState.masks.push(newMask)
         state.editState.activeMaskId = id
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.masks.push({ ...newMask })
+          state.images[state.currentImageIndex].editState.activeMaskId = id
+        }
       })
       get().pushHistory(`Add ${type} mask`)
       return id
@@ -422,6 +777,12 @@ export const useEditorStore = create<EditorStore>()(
         if (mask) {
           Object.assign(mask, updates)
         }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          const imgMask = state.images[state.currentImageIndex].editState.masks.find((m) => m.id === id)
+          if (imgMask) {
+            Object.assign(imgMask, updates)
+          }
+        }
       })
     },
 
@@ -431,6 +792,13 @@ export const useEditorStore = create<EditorStore>()(
         if (state.editState.activeMaskId === id) {
           state.editState.activeMaskId = null
         }
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.masks =
+            state.images[state.currentImageIndex].editState.masks.filter((m) => m.id !== id)
+          if (state.images[state.currentImageIndex].editState.activeMaskId === id) {
+            state.images[state.currentImageIndex].editState.activeMaskId = null
+          }
+        }
       })
       get().pushHistory('Delete mask')
     },
@@ -438,6 +806,9 @@ export const useEditorStore = create<EditorStore>()(
     setActiveMask: (id) => {
       set((state) => {
         state.editState.activeMaskId = id
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState.activeMaskId = id
+        }
       })
     },
 
@@ -450,29 +821,37 @@ export const useEditorStore = create<EditorStore>()(
 
     // History
     undo: () => {
-      const { history, historyIndex } = get()
+      const { history, historyIndex, currentImageIndex, images } = get()
       if (historyIndex > 0) {
         const prevState = history[historyIndex - 1]
         set((state) => {
           state.editState = JSON.parse(JSON.stringify(prevState.editState))
           state.historyIndex = historyIndex - 1
+          if (currentImageIndex >= 0 && images[currentImageIndex]) {
+            state.images[currentImageIndex].editState = JSON.parse(JSON.stringify(prevState.editState))
+            state.images[currentImageIndex].historyIndex = historyIndex - 1
+          }
         })
       }
     },
 
     redo: () => {
-      const { history, historyIndex } = get()
+      const { history, historyIndex, currentImageIndex, images } = get()
       if (historyIndex < history.length - 1) {
         const nextState = history[historyIndex + 1]
         set((state) => {
           state.editState = JSON.parse(JSON.stringify(nextState.editState))
           state.historyIndex = historyIndex + 1
+          if (currentImageIndex >= 0 && images[currentImageIndex]) {
+            state.images[currentImageIndex].editState = JSON.parse(JSON.stringify(nextState.editState))
+            state.images[currentImageIndex].historyIndex = historyIndex + 1
+          }
         })
       }
     },
 
     pushHistory: (label) => {
-      const { editState, history, historyIndex, maxHistory } = get()
+      const { editState, history, historyIndex, maxHistory, currentImageIndex, images } = get()
 
       // Clone edit state
       const entry: HistoryEntry = {
@@ -492,6 +871,12 @@ export const useEditorStore = create<EditorStore>()(
         }
 
         state.historyIndex = state.history.length - 1
+
+        // Sync to current image
+        if (currentImageIndex >= 0 && images[currentImageIndex]) {
+          state.images[currentImageIndex].history = [...state.history]
+          state.images[currentImageIndex].historyIndex = state.historyIndex
+        }
       })
     },
 
@@ -535,10 +920,19 @@ export const useEditorStore = create<EditorStore>()(
       })
     },
 
+    toggleFilmstrip: () => {
+      set((state) => {
+        state.showFilmstrip = !state.showFilmstrip
+      })
+    },
+
     // Reset all
     resetAllEdits: () => {
       set((state) => {
-        state.editState = { ...DEFAULT_EDIT_STATE }
+        state.editState = createDefaultEditState()
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState = createDefaultEditState()
+        }
       })
       get().pushHistory('Reset all edits')
     },
@@ -547,6 +941,9 @@ export const useEditorStore = create<EditorStore>()(
     applyPreset: (newEditState: EditState) => {
       set((state) => {
         state.editState = JSON.parse(JSON.stringify(newEditState))
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].editState = JSON.parse(JSON.stringify(newEditState))
+        }
       })
       get().pushHistory('Apply preset')
     },

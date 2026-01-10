@@ -37,7 +37,7 @@ export function RightPanel() {
     <div className="w-80 bg-dark-800 border-l border-dark-400 flex flex-col shrink-0">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-dark-400">
-        <h2 className="text-sm font-medium text-white">Edit</h2>
+        <h2 className="text-xs font-medium text-white uppercase tracking-wide">Edit</h2>
         <button
           onClick={() => setIsCollapsed(true)}
           className="p-1 text-gray-400 hover:text-white hover:bg-dark-600 rounded"

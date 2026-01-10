@@ -214,3 +214,20 @@ export interface Preset {
   editState: Partial<EditState>
   thumbnail?: string
 }
+
+// Image item for multi-image support
+export interface ImageItem {
+  id: string
+  file: File
+  fileName: string
+  originalWidth: number
+  originalHeight: number
+  proxyBitmap: ImageBitmap | null
+  fullBitmap: ImageBitmap | null
+  thumbnail: string | null // base64 data URL for thumbnail
+  editState: EditState
+  history: HistoryEntry[]
+  historyIndex: number
+  isLoading: boolean
+  rating: number // 0-5 star rating (0 = no rating)
+}
