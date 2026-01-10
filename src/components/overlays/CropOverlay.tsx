@@ -157,61 +157,50 @@ export function CropOverlay({ imageDisplay, containerRef }: CropOverlayProps) {
     }
   }, [dragging, handleMouseMove, handleMouseUp])
 
-  // Apply aspect ratio immediately when it changes
+  // Apply aspect ratio immediately when it changes - always calculate from full image size
   useEffect(() => {
     const aspectRatio = getAspectRatio()
     if (!aspectRatio) return
 
     // Calculate the normalized ratio (accounts for image aspect)
+    // normalizedRatio is the ratio in normalized coordinates (0-1)
     const normalizedRatio = aspectRatio / imageAspect
 
-    // Current crop dimensions
-    const { x, y, width, height } = crop
+    // Calculate the maximum crop size that fits the aspect ratio within the full image
+    let newWidth: number
+    let newHeight: number
 
-    // Calculate the center of the current crop
-    const centerX = x + width / 2
-    const centerY = y + height / 2
-
-    // Calculate new dimensions that maintain the aspect ratio
-    // while staying as close to the current size as possible
-    let newWidth = width
-    let newHeight = height
-
-    // Current normalized aspect ratio of crop
-    const currentRatio = width / height
-
-    if (currentRatio > normalizedRatio) {
-      // Current crop is too wide, adjust width
-      newWidth = height * normalizedRatio
-    } else {
-      // Current crop is too tall, adjust height
-      newHeight = width / normalizedRatio
-    }
-
-    // Re-center the crop
-    let newX = centerX - newWidth / 2
-    let newY = centerY - newHeight / 2
-
-    // Constrain to image bounds
-    if (newX < 0) newX = 0
-    if (newY < 0) newY = 0
-    if (newX + newWidth > 1) newX = 1 - newWidth
-    if (newY + newHeight > 1) newY = 1 - newHeight
-
-    // Make sure crop still fits after adjustments
-    if (newWidth > 1) {
+    if (normalizedRatio >= 1) {
+      // Target aspect is wider than tall (in normalized coords)
+      // Start with full width, calculate height
       newWidth = 1
-      newHeight = newWidth / normalizedRatio
-      newX = 0
-    }
-    if (newHeight > 1) {
+      newHeight = 1 / normalizedRatio
+
+      // If height exceeds 1, scale down
+      if (newHeight > 1) {
+        newHeight = 1
+        newWidth = normalizedRatio
+      }
+    } else {
+      // Target aspect is taller than wide (in normalized coords)
+      // Start with full height, calculate width
       newHeight = 1
-      newWidth = newHeight * normalizedRatio
-      newY = 0
+      newWidth = normalizedRatio
+
+      // If width exceeds 1, scale down
+      if (newWidth > 1) {
+        newWidth = 1
+        newHeight = 1 / normalizedRatio
+      }
     }
 
-    // Only update if significantly different
-    if (Math.abs(width - newWidth) > 0.001 || Math.abs(height - newHeight) > 0.001) {
+    // Center the crop
+    const newX = (1 - newWidth) / 2
+    const newY = (1 - newHeight) / 2
+
+    // Only update if significantly different from current
+    if (Math.abs(crop.width - newWidth) > 0.001 || Math.abs(crop.height - newHeight) > 0.001 ||
+        Math.abs(crop.x - newX) > 0.001 || Math.abs(crop.y - newY) > 0.001) {
       setCrop({ x: newX, y: newY, width: newWidth, height: newHeight })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
