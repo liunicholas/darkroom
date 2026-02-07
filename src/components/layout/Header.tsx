@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { useEditorStore } from '@/stores/editor-store'
 import { IconButton } from '@/components/ui/IconButton'
 import { Button } from '@/components/ui/Button'
@@ -10,7 +9,6 @@ import { ExportModal } from '@/components/ExportModal'
 import { StarRating } from '@/components/ui/StarRating'
 
 export function Header() {
-  const router = useRouter()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const [showImportMenu, setShowImportMenu] = useState(false)
@@ -26,6 +24,7 @@ export function Header() {
     nextImage,
     previousImage,
     setImageRating,
+    setImageFlag,
     zoom,
     setZoom,
     showBeforeAfter,
@@ -34,6 +33,9 @@ export function Header() {
     redo,
     canUndo,
     canRedo,
+    viewMode,
+    setViewMode,
+    requestAIInputFocus,
   } = useEditorStore()
 
   const handleImportFile = useCallback(() => {
@@ -89,10 +91,6 @@ export function Header() {
     setZoom(1)
   }, [setZoom])
 
-  const handleHome = useCallback(() => {
-    router.push('/')
-  }, [router])
-
   const currentImage = images[currentImageIndex]
 
   return (
@@ -119,13 +117,9 @@ export function Header() {
 
       {/* Left: Logo and file actions */}
       <div className="flex items-center gap-4">
-        <button
-          onClick={handleHome}
-          className="text-xl font-display font-bold tracking-tight hover:opacity-80 transition-opacity flex items-center"
-        >
-          <span className="text-white">Dark</span>
-          <span className="text-maroon">room</span>
-        </button>
+        <span className="text-sm font-display font-medium tracking-wider uppercase text-gray-300">
+          darkroom
+        </span>
 
         <div className="h-6 w-px bg-dark-500" />
 
@@ -204,6 +198,10 @@ export function Header() {
                 </span>
                 <InfoIcon className="w-3.5 h-3.5 text-gray-500 group-hover:text-maroon opacity-0 group-hover:opacity-100 transition-opacity" />
               </button>
+              {/* Flag status indicator */}
+              {currentImage && currentImage.flagStatus !== 'none' && (
+                <FlagBadge status={currentImage.flagStatus} />
+              )}
               <StarRating
                 rating={currentImage?.rating || 0}
                 onRatingChange={(rating) => setImageRating(currentImageIndex, rating)}
@@ -231,6 +229,9 @@ export function Header() {
               </span>
               <InfoIcon className="w-3.5 h-3.5 text-gray-500 group-hover:text-maroon opacity-0 group-hover:opacity-100 transition-opacity" />
             </button>
+            {currentImage.flagStatus !== 'none' && (
+              <FlagBadge status={currentImage.flagStatus} />
+            )}
             <StarRating
               rating={currentImage.rating || 0}
               onRatingChange={(rating) => setImageRating(currentImageIndex, rating)}
@@ -262,6 +263,17 @@ export function Header() {
 
       {/* Right: View actions */}
       <div className="flex items-center gap-1">
+        {/* Grid/Edit toggle */}
+        <IconButton
+          icon={viewMode === 'grid' ? <EditViewIcon /> : <GridIcon />}
+          onClick={() => setViewMode(viewMode === 'edit' ? 'grid' : 'edit')}
+          active={viewMode === 'grid'}
+          tooltip={viewMode === 'grid' ? 'Edit view (G)' : 'Grid view (G)'}
+          size="sm"
+        />
+
+        <div className="h-6 w-px bg-dark-500 mx-1" />
+
         <IconButton
           icon={<ZoomOutIcon />}
           onClick={handleZoomOut}
@@ -284,13 +296,21 @@ export function Header() {
           size="sm"
         />
 
-        <div className="h-6 w-px bg-dark-500 mx-2" />
+        <div className="h-6 w-px bg-dark-500 mx-1" />
 
         <IconButton
           icon={<CompareIcon />}
           onClick={toggleBeforeAfter}
           active={showBeforeAfter}
           tooltip="Before/After (Y)"
+          size="sm"
+        />
+
+        {/* Rubin focus */}
+        <IconButton
+          icon={<AIIcon />}
+          onClick={requestAIInputFocus}
+          tooltip="Rubin (/)"
           size="sm"
         />
       </div>
@@ -307,6 +327,28 @@ export function Header() {
         onClose={() => setShowExportModal(false)}
       />
     </header>
+  )
+}
+
+// Flag badge component
+function FlagBadge({ status }: { status: 'picked' | 'rejected' }) {
+  if (status === 'picked') {
+    return (
+      <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-green-900/30 text-green-400">
+        <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+        </svg>
+        Pick
+      </span>
+    )
+  }
+  return (
+    <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] bg-red-900/30 text-red-400">
+      <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+      </svg>
+      Reject
+    </span>
   )
 }
 
@@ -410,7 +452,31 @@ function FitIcon() {
 function CompareIcon() {
   return (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v18M3 6h6v12H3zM15 6h6v12h-6z" />
+    </svg>
+  )
+}
+
+function GridIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+    </svg>
+  )
+}
+
+function EditViewIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 5a1 1 0 011-1h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5z" />
+    </svg>
+  )
+}
+
+function AIIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z" />
     </svg>
   )
 }

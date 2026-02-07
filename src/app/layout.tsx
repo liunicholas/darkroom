@@ -1,17 +1,16 @@
 import type { Metadata } from 'next'
-import { Instrument_Serif, Manrope } from 'next/font/google'
+import { JetBrains_Mono, Inter } from 'next/font/google'
 import './globals.css'
 
-// Elegant serif for branding
-const instrumentSerif = Instrument_Serif({
+// Monospace for branding and technical accents
+const jetbrainsMono = JetBrains_Mono({
   subsets: ['latin'],
-  weight: '400',
   variable: '--font-display',
   display: 'swap',
 })
 
-// Clean, refined sans for body
-const manrope = Manrope({
+// Clean sans for body/UI
+const inter = Inter({
   subsets: ['latin'],
   variable: '--font-body',
   display: 'swap',
@@ -19,7 +18,7 @@ const manrope = Manrope({
 
 export const metadata: Metadata = {
   title: 'Darkroom',
-  description: 'Develop your photographs',
+  description: 'Photo editor',
   icons: {
     icon: '/favicon.svg',
   },
@@ -31,7 +30,7 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className={`${instrumentSerif.variable} ${manrope.variable}`}>
+    <html lang="en" className={`${jetbrainsMono.variable} ${inter.variable}`}>
       <body className="bg-stone-950 text-stone-100 antialiased font-body">
         {children}
       </body>

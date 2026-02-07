@@ -13,7 +13,7 @@ interface ExportModalProps {
 }
 
 type BrandType = 'fujifilm' | 'canon' | 'nikon' | 'sony' | 'leica'
-type ResolutionType = 'original' | '4k' | '2k' | '1080p' | 'instagram'
+type ResolutionType = 'original' | '4k' | '2k' | '1080p'
 type ExportMode = 'current' | 'all'
 
 export interface ExportOptions {
@@ -72,7 +72,6 @@ const RESOLUTION_PRESETS: { value: ResolutionType; label: string; longEdge: numb
   { value: '4k', label: '4K', longEdge: 3840 },
   { value: '2k', label: '2K', longEdge: 2560 },
   { value: '1080p', label: '1080p', longEdge: 1920 },
-  { value: 'instagram', label: 'Instagram', longEdge: 1080 },
 ]
 
 const MIN_BORDER_WITH_TEXT = 3

@@ -1,298 +1,222 @@
 'use client'
 
-import { useCallback, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useMemo, useCallback } from 'react'
 import { useEditorStore } from '@/stores/editor-store'
+import { Header } from '@/components/layout/Header'
+import { RightPanel } from '@/components/layout/RightPanel'
+import { MainCanvas } from '@/components/layout/MainCanvas'
+import { Filmstrip } from '@/components/layout/Filmstrip'
+import { FilterBar } from '@/components/layout/FilterBar'
+import { GridView } from '@/components/layout/GridView'
 
-export default function Home() {
-  const router = useRouter()
-  const [isDragging, setIsDragging] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const folderInputRef = useRef<HTMLInputElement>(null)
-  const loadImage = useEditorStore((state) => state.loadImage)
-  const loadImages = useEditorStore((state) => state.loadImages)
+export default function EditorPage() {
+  const isHydrating = useEditorStore((state) => state.isHydrating)
+  const hydrateFromDB = useEditorStore((state) => state.hydrateFromDB)
+  const images = useEditorStore((state) => state.images)
+  const toggleBeforeAfter = useEditorStore((state) => state.toggleBeforeAfter)
+  const undo = useEditorStore((state) => state.undo)
+  const redo = useEditorStore((state) => state.redo)
+  const currentImageIndex = useEditorStore((state) => state.currentImageIndex)
+  const setCurrentImage = useEditorStore((state) => state.setCurrentImage)
+  const setImageRating = useEditorStore((state) => state.setImageRating)
+  const setImageFlag = useEditorStore((state) => state.setImageFlag)
+  const filterFlag = useEditorStore((state) => state.filterFlag)
+  const filterRating = useEditorStore((state) => state.filterRating)
+  const viewMode = useEditorStore((state) => state.viewMode)
+  const setViewMode = useEditorStore((state) => state.setViewMode)
+  const requestAIInputFocus = useEditorStore((state) => state.requestAIInputFocus)
 
-  const handleFiles = useCallback(async (files: File[]) => {
-    const imageFiles = files.filter(file =>
-      file.type.startsWith('image/') ||
-      /\.(jpg|jpeg|png|gif|webp|bmp|tiff?)$/i.test(file.name)
-    )
+  const hasImages = images.length > 0
+  const isFilterActive = filterFlag !== 'all' || filterRating > 0
 
-    if (imageFiles.length === 0) {
-      return
-    }
-
-    setIsLoading(true)
-
-    try {
-      if (imageFiles.length === 1) {
-        await loadImage(imageFiles[0])
-      } else {
-        await loadImages(imageFiles)
-      }
-      router.push('/editor')
-    } catch (error) {
-      console.error('Failed to load images:', error)
-      setIsLoading(false)
-    }
-  }, [loadImage, loadImages, router])
-
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-
-    const items = e.dataTransfer.items
-    const collectedFiles: File[] = []
-
-    // Get file from FileSystemFileEntry
-    const getFile = (fileEntry: FileSystemFileEntry): Promise<File> => {
-      return new Promise((resolve, reject) => {
-        fileEntry.file(resolve, reject)
+  // Compute filtered images list with original indices
+  const filteredImages = useMemo(() => {
+    return images
+      .map((img, idx) => ({ img, idx }))
+      .filter(({ img }) => {
+        if (filterFlag !== 'all') {
+          if (filterFlag === 'unflagged' && img.flagStatus !== 'none') return false
+          if (filterFlag === 'picked' && img.flagStatus !== 'picked') return false
+          if (filterFlag === 'rejected' && img.flagStatus !== 'rejected') return false
+        }
+        if (filterRating > 0 && img.rating < filterRating) return false
+        return true
       })
-    }
+  }, [images, filterFlag, filterRating])
 
-    // Read all entries from a directory (handles batching)
-    const readAllEntries = (dirReader: FileSystemDirectoryReader): Promise<FileSystemEntry[]> => {
-      return new Promise((resolve, reject) => {
-        const entries: FileSystemEntry[] = []
-        const readBatch = () => {
-          dirReader.readEntries((batch) => {
-            if (batch.length === 0) {
-              resolve(entries)
-            } else {
-              entries.push(...batch)
-              readBatch()
-            }
-          }, reject)
-        }
-        readBatch()
-      })
-    }
+  const hasFilteredImages = filteredImages.length > 0
 
-    // Recursively read directory entries
-    const readEntry = async (entry: FileSystemEntry): Promise<void> => {
-      if (entry.isFile) {
-        try {
-          const file = await getFile(entry as FileSystemFileEntry)
-          collectedFiles.push(file)
-        } catch (err) {
-          console.warn('Failed to read file:', entry.name, err)
-        }
-      } else if (entry.isDirectory) {
-        try {
-          const dirReader = (entry as FileSystemDirectoryEntry).createReader()
-          const entries = await readAllEntries(dirReader)
-          await Promise.all(entries.map(readEntry))
-        } catch (err) {
-          console.warn('Failed to read directory:', entry.name, err)
-        }
+  // Whether the current image passes the active filter
+  const currentImagePassesFilter = useMemo(() => {
+    return filteredImages.some(({ idx }) => idx === currentImageIndex)
+  }, [filteredImages, currentImageIndex])
+
+  // Filter-aware next/previous navigation
+  const nextFilteredImage = useCallback(() => {
+    const currentPos = filteredImages.findIndex(({ idx }) => idx === currentImageIndex)
+    if (currentPos < filteredImages.length - 1) {
+      setCurrentImage(filteredImages[currentPos + 1].idx)
+    } else if (currentPos === -1 && filteredImages.length > 0) {
+      // Current image not in filter — jump to first filtered image after current
+      const next = filteredImages.find(({ idx }) => idx > currentImageIndex)
+      if (next) setCurrentImage(next.idx)
+      else setCurrentImage(filteredImages[0].idx)
+    }
+  }, [filteredImages, currentImageIndex, setCurrentImage])
+
+  const previousFilteredImage = useCallback(() => {
+    const currentPos = filteredImages.findIndex(({ idx }) => idx === currentImageIndex)
+    if (currentPos > 0) {
+      setCurrentImage(filteredImages[currentPos - 1].idx)
+    } else if (currentPos === -1 && filteredImages.length > 0) {
+      // Current image not in filter — jump to last filtered image before current
+      const prev = [...filteredImages].reverse().find(({ idx }) => idx < currentImageIndex)
+      if (prev) setCurrentImage(prev.idx)
+      else setCurrentImage(filteredImages[filteredImages.length - 1].idx)
+    }
+  }, [filteredImages, currentImageIndex, setCurrentImage])
+
+  // When filter changes and current image no longer passes, jump to nearest filtered image
+  useEffect(() => {
+    if (images.length === 0 || filteredImages.length === 0) return
+    if (currentImagePassesFilter) return
+
+    // Find the nearest filtered image to the current index
+    let bestIdx = filteredImages[0].idx
+    let bestDist = Math.abs(bestIdx - currentImageIndex)
+    for (const { idx } of filteredImages) {
+      const dist = Math.abs(idx - currentImageIndex)
+      if (dist < bestDist) {
+        bestDist = dist
+        bestIdx = idx
       }
     }
+    setCurrentImage(bestIdx)
+  }, [currentImagePassesFilter, filteredImages, currentImageIndex, images.length, setCurrentImage])
 
-    if (items && items.length > 0) {
-      const entries: FileSystemEntry[] = []
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i]
-        if (item.kind === 'file') {
-          const entry = item.webkitGetAsEntry?.()
-          if (entry) {
-            entries.push(entry)
-          } else {
-            const file = item.getAsFile()
-            if (file) collectedFiles.push(file)
+  // Hydrate session from IndexedDB on mount
+  useEffect(() => {
+    hydrateFromDB()
+  }, [hydrateFromDB])
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return
+      }
+
+      if (!hasImages) return
+
+      if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault()
+        toggleBeforeAfter()
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && e.shiftKey) {
+        e.preventDefault()
+        redo()
+      }
+
+      if (e.key === 'ArrowLeft' && !e.metaKey && !e.ctrlKey) {
+        previousFilteredImage()
+      }
+      if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) {
+        nextFilteredImage()
+      }
+
+      if (['0', '1', '2', '3', '4', '5'].includes(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        const rating = parseInt(e.key, 10)
+        setImageRating(currentImageIndex, rating)
+      }
+
+      if (e.key === 'p' || e.key === 'P') {
+        if (!e.metaKey && !e.ctrlKey) {
+          e.preventDefault()
+          const currentImage = useEditorStore.getState().images[currentImageIndex]
+          if (currentImage) {
+            setImageFlag(currentImageIndex, currentImage.flagStatus === 'picked' ? 'none' : 'picked')
           }
         }
       }
-      await Promise.all(entries.map(readEntry))
-    } else if (e.dataTransfer.files.length > 0) {
-      for (let i = 0; i < e.dataTransfer.files.length; i++) {
-        collectedFiles.push(e.dataTransfer.files[i])
+
+      if (e.key === 'x' || e.key === 'X') {
+        if (!e.metaKey && !e.ctrlKey) {
+          e.preventDefault()
+          const currentImage = useEditorStore.getState().images[currentImageIndex]
+          if (currentImage) {
+            setImageFlag(currentImageIndex, currentImage.flagStatus === 'rejected' ? 'none' : 'rejected')
+          }
+        }
+      }
+
+      if (e.key === 'u' || e.key === 'U') {
+        if (!e.metaKey && !e.ctrlKey) {
+          e.preventDefault()
+          setImageFlag(currentImageIndex, 'none')
+        }
+      }
+
+      if (e.key === 'g' || e.key === 'G') {
+        if (!e.metaKey && !e.ctrlKey) {
+          e.preventDefault()
+          setViewMode(viewMode === 'edit' ? 'grid' : 'edit')
+        }
+      }
+
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault()
+        requestAIInputFocus()
       }
     }
 
-    if (collectedFiles.length > 0) {
-      handleFiles(collectedFiles)
-    }
-  }, [handleFiles])
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [hasImages, toggleBeforeAfter, undo, redo, nextFilteredImage, previousFilteredImage, currentImageIndex, setImageRating, setImageFlag, viewMode, setViewMode, requestAIInputFocus])
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }, [])
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    if (e.currentTarget === e.target) {
-      setIsDragging(false)
-    }
-  }, [])
-
-  const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || [])
-    if (files.length > 0) {
-      handleFiles(files)
-    }
-    if (fileInputRef.current) fileInputRef.current.value = ''
-  }, [handleFiles])
-
-  const handleFolderInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || [])
-    if (files.length > 0) {
-      handleFiles(files)
-    }
-    if (folderInputRef.current) folderInputRef.current.value = ''
-  }, [handleFiles])
+  if (isHydrating) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-dark-900">
+        <div className="text-dark-400 text-sm">Restoring session...</div>
+      </div>
+    )
+  }
 
   return (
-    <main className="min-h-screen flex flex-col bg-stone-950">
-      {/* Hidden file inputs */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        multiple
-        onChange={handleFileInput}
-        className="hidden"
-      />
-      <input
-        ref={folderInputRef}
-        type="file"
-        // @ts-ignore
-        webkitdirectory=""
-        directory=""
-        multiple
-        onChange={handleFolderInput}
-        className="hidden"
-      />
+    <div className="h-screen flex flex-col bg-dark-900 overflow-hidden">
+      <Header />
 
-      {/* Main content */}
-      <div className="flex-1 flex flex-col items-center justify-center px-6 py-20">
-        {/* Logo */}
-        <div
-          className="mb-16 animate-fade-in"
-          style={{ animationDelay: '0ms' }}
-        >
-          <h1 className="font-display text-6xl md:text-7xl text-stone-100 tracking-tight">
-            Darkroom
-          </h1>
-          <p className="text-stone-500 text-center mt-3 text-sm tracking-wide">
-            Develop your photographs
-          </p>
-        </div>
+      {hasImages && <FilterBar />}
 
-        {/* Drop zone */}
-        <div
-          className="w-full max-w-xl animate-fade-in"
-          style={{ animationDelay: '100ms', animationFillMode: 'backwards' }}
-        >
-          <div
-            onDrop={handleDrop}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onClick={() => folderInputRef.current?.click()}
-            className={`
-              relative w-full aspect-[3/2] rounded-xl cursor-pointer
-              border transition-all duration-300 ease-out
-              flex flex-col items-center justify-center
-              ${isDragging
-                ? 'border-red-900 bg-red-900/5 scale-[1.01]'
-                : 'border-stone-800 hover:border-stone-700 bg-stone-900/30'
-              }
-              ${isLoading ? 'pointer-events-none opacity-50' : ''}
-            `}
-          >
-            {/* Loading state */}
-            {isLoading && (
-              <div className="absolute inset-0 flex items-center justify-center bg-stone-950/60 rounded-xl z-10">
-                <div className="flex flex-col items-center gap-3">
-                  <div className="w-8 h-8 border-2 border-red-900 border-t-transparent rounded-full animate-spin" />
-                  <span className="text-sm text-stone-400">Loading...</span>
+      {viewMode === 'grid' && hasImages ? (
+        <GridView />
+      ) : (
+        <div className="flex-1 flex overflow-hidden">
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {isFilterActive && hasImages && !hasFilteredImages ? (
+              <div className="flex-1 flex items-center justify-center bg-dark-900">
+                <div className="text-center">
+                  <svg className="w-10 h-10 mx-auto mb-3 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 01-.659 1.591l-5.432 5.432a2.25 2.25 0 00-.659 1.591v2.927a2.25 2.25 0 01-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 00-.659-1.591L3.659 7.409A2.25 2.25 0 013 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0112 3z" />
+                  </svg>
+                  <p className="text-sm text-gray-600">No images match the current filters</p>
                 </div>
               </div>
+            ) : (
+              <MainCanvas />
             )}
-
-            {/* Icon */}
-            <div className={`
-              mb-4 transition-all duration-300
-              ${isDragging ? 'scale-110 text-red-900' : 'text-stone-600'}
-            `}>
-              <svg
-                className="w-12 h-12"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                strokeWidth={1}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"
-                />
-              </svg>
-            </div>
-
-            <p className={`text-sm transition-colors duration-300 ${
-              isDragging ? 'text-red-900' : 'text-stone-400'
-            }`}>
-              {isDragging ? 'Drop to import' : 'Drop images or folders here'}
-            </p>
-            <p className="text-xs text-stone-600 mt-1">
-              or click to browse
-            </p>
+            <Filmstrip />
           </div>
-
-          {/* Buttons */}
-          <div className="flex items-center justify-center gap-3 mt-6">
-            <button
-              onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click() }}
-              disabled={isLoading}
-              className="flex items-center gap-2 px-5 py-2.5 bg-accent hover:bg-accent-light rounded-lg text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-              </svg>
-              Import Files
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); folderInputRef.current?.click() }}
-              disabled={isLoading}
-              className="flex items-center gap-2 px-5 py-2.5 bg-stone-800 hover:bg-stone-700 border border-stone-700 hover:border-stone-600 rounded-lg text-stone-300 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-              </svg>
-              Import Folder
-            </button>
-          </div>
+          <RightPanel />
         </div>
+      )}
 
-        {/* Features */}
-        <div
-          className="mt-24 flex flex-wrap justify-center gap-12 text-center max-w-2xl animate-fade-in"
-          style={{ animationDelay: '200ms', animationFillMode: 'backwards' }}
-        >
-          <Feature title="Light" desc="Exposure, contrast, shadows" />
-          <Feature title="Color" desc="Temperature, HSL, grading" />
-          <Feature title="Detail" desc="Curves, sharpening, effects" />
-        </div>
-      </div>
-
-      {/* Footer */}
-      <footer className="py-6 text-center">
-        <p className="text-xs text-stone-700">
-          RAW &middot; JPEG &middot; PNG &middot; WebP &middot; TIFF
-        </p>
-      </footer>
-    </main>
-  )
-}
-
-function Feature({ title, desc }: { title: string; desc: string }) {
-  return (
-    <div className="w-32">
-      <h3 className="text-stone-300 text-sm font-medium mb-1">{title}</h3>
-      <p className="text-xs text-stone-600">{desc}</p>
     </div>
   )
 }

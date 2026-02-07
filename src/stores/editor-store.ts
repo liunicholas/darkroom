@@ -15,7 +15,18 @@ import type {
   HistoryEntry,
   BrushSettings,
   HSLColor,
+  FlagStatus,
 } from '@/types/edit-state'
+import type { PresetData } from '@/lib/presets/fujifilm-presets'
+import {
+  saveImage as dbSaveImage,
+  loadAllImages as dbLoadAllImages,
+  deleteImage as dbDeleteImage,
+  clearAllImages as dbClearAllImages,
+  saveSession as dbSaveSession,
+  loadSession as dbLoadSession,
+  type PersistedImage,
+} from '@/lib/session-db'
 
 // Default values
 const DEFAULT_BASIC: BasicAdjustments = {
@@ -107,8 +118,89 @@ const DEFAULT_BRUSH_SETTINGS: BrushSettings = {
 // Helper to create default edit state
 const createDefaultEditState = (): EditState => JSON.parse(JSON.stringify(DEFAULT_EDIT_STATE))
 
+// Debounce helper
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function debounce<T extends (...args: any[]) => void>(fn: T, ms: number): T {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((...args: any[]) => {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => fn(...args), ms)
+  }) as unknown as T
+}
+
+// Build a PersistedImage from an ImageItem — deep-clones all data
+// to avoid issues with frozen Immer objects in structured clone
+function toPersistedImage(img: ImageItem): PersistedImage {
+  return {
+    id: img.id,
+    fileName: img.fileName,
+    originalWidth: img.originalWidth,
+    originalHeight: img.originalHeight,
+    imageBlob: img.file, // File/Blob is not frozen by Immer
+    thumbnail: img.thumbnail,
+    editState: JSON.parse(JSON.stringify(img.editState)),
+    history: JSON.parse(JSON.stringify(img.history)),
+    historyIndex: img.historyIndex,
+    rating: img.rating,
+    flagStatus: img.flagStatus,
+    aiChatMessages: JSON.parse(JSON.stringify(img.aiChatMessages)),
+    aiLastResponse: img.aiLastResponse ? JSON.parse(JSON.stringify(img.aiLastResponse)) : null,
+  }
+}
+
+// Per-image debounce timers (keyed by image id) so saves for different images don't cancel each other
+const imageTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function debouncedSaveImage(img: ImageItem) {
+  const existing = imageTimers.get(img.id)
+  if (existing) clearTimeout(existing)
+  imageTimers.set(img.id, setTimeout(() => {
+    imageTimers.delete(img.id)
+    dbSaveImage(toPersistedImage(img)).catch((err) => console.error('[DB] saveImage failed:', err))
+  }, 300))
+}
+
+// Debounced session save
+let sessionTimer: ReturnType<typeof setTimeout> | null = null
+function debouncedSaveSession(data: {
+  currentImageIndex: number
+  customPresets: PresetData[]
+  filterFlag: 'all' | 'picked' | 'rejected' | 'unflagged'
+  filterRating: number
+  viewMode: 'edit' | 'grid'
+}) {
+  if (sessionTimer) clearTimeout(sessionTimer)
+  sessionTimer = setTimeout(() => {
+    sessionTimer = null
+    dbSaveSession(data).catch((err) => console.error('[DB] saveSession failed:', err))
+  }, 300)
+}
+
+// Helper to persist current session metadata from store state
+function persistSession(state: EditorStore) {
+  debouncedSaveSession({
+    currentImageIndex: state.currentImageIndex,
+    customPresets: JSON.parse(JSON.stringify(state.customPresets)),
+    filterFlag: state.filterFlag,
+    filterRating: state.filterRating,
+    viewMode: state.viewMode,
+  })
+}
+
+// Helper to persist the current image
+function persistCurrentImage(state: EditorStore) {
+  const img = state.images[state.currentImageIndex]
+  if (img) {
+    debouncedSaveImage(img)
+  }
+}
+
 // Store interface
 interface EditorStore {
+  // Session hydration
+  isHydrating: boolean
+  hydrateFromDB: () => Promise<void>
+
   // Multi-image support
   images: ImageItem[]
   currentImageIndex: number
@@ -125,6 +217,23 @@ interface EditorStore {
 
   // Brush settings
   brushSettings: BrushSettings
+
+  // Filter state
+  filterFlag: 'all' | 'picked' | 'rejected' | 'unflagged'
+  filterRating: number
+
+  // View mode
+  viewMode: 'edit' | 'grid'
+
+  // Custom presets (AI-generated)
+  customPresets: PresetData[]
+
+  // AI chat (per-image, synced like editState)
+  aiChatMessages: { role: string; content: string }[]
+  aiLastResponse: { explanation: string; adjustments: unknown } | null
+
+  // AI focus
+  aiInputFocusRequested: boolean
 
   // UI state
   activeTool: 'select' | 'crop' | 'brush' | 'radialGradient' | 'linearGradient'
@@ -146,6 +255,22 @@ interface EditorStore {
   previousImage: () => void
   getCurrentImage: () => ImageItem | null
   setImageRating: (index: number, rating: number) => void
+  setImageFlag: (index: number, flag: FlagStatus) => void
+  setFilterFlag: (filter: 'all' | 'picked' | 'rejected' | 'unflagged') => void
+  setFilterRating: (rating: number) => void
+  setViewMode: (mode: 'edit' | 'grid') => void
+  getFilteredImages: () => ImageItem[]
+
+  // Custom presets
+  addCustomPreset: (preset: PresetData) => void
+  removeCustomPreset: (name: string) => void
+
+  // AI chat
+  setAIChatState: (messages: { role: string; content: string }[], lastResponse: { explanation: string; adjustments: unknown } | null) => void
+
+  // AI focus
+  requestAIInputFocus: () => void
+  clearAIInputFocusRequest: () => void
 
   // Legacy actions
   resetImage: () => void
@@ -214,7 +339,7 @@ interface EditorStore {
 
 // Max dimension for proxy image
 const MAX_PROXY_DIMENSION = 2048
-const THUMBNAIL_SIZE = 120
+const THUMBNAIL_SIZE = 480
 
 // Helper to generate thumbnail
 async function generateThumbnail(bitmap: ImageBitmap): Promise<string> {
@@ -226,7 +351,7 @@ async function generateThumbnail(bitmap: ImageBitmap): Promise<string> {
   const ctx = canvas.getContext('2d')!
   ctx.drawImage(bitmap, 0, 0, width, height)
 
-  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.7 })
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 })
   return new Promise((resolve) => {
     const reader = new FileReader()
     reader.onloadend = () => resolve(reader.result as string)
@@ -271,17 +396,40 @@ async function processImageFile(file: File): Promise<Omit<ImageItem, 'id'>> {
     historyIndex: -1,
     isLoading: false,
     rating: 0,
+    flagStatus: 'none',
+    aiChatMessages: [],
+    aiLastResponse: null,
   }
 }
 
 // Create store
 export const useEditorStore = create<EditorStore>()(
   immer((set, get) => ({
+    // Session hydration
+    isHydrating: false,
+
     // Multi-image state
     images: [],
     currentImageIndex: -1,
     isLoadingImages: false,
     loadingProgress: { current: 0, total: 0 },
+
+    // Filter state
+    filterFlag: 'all' as const,
+    filterRating: 0,
+
+    // View mode
+    viewMode: 'edit' as const,
+
+    // Custom presets
+    customPresets: [] as PresetData[],
+
+    // AI chat (per-image, synced like editState)
+    aiChatMessages: [] as { role: string; content: string }[],
+    aiLastResponse: null as { explanation: string; adjustments: unknown } | null,
+
+    // AI focus
+    aiInputFocusRequested: false,
 
     // Computed legacy compatibility (updated via sync)
     imageSource: null,
@@ -307,6 +455,117 @@ export const useEditorStore = create<EditorStore>()(
         return images[currentImageIndex]
       }
       return null
+    },
+
+    // Hydrate from IndexedDB
+    hydrateFromDB: async () => {
+      set((state) => {
+        state.isHydrating = true
+      })
+
+      try {
+        const [persistedImages, session] = await Promise.all([
+          dbLoadAllImages(),
+          dbLoadSession(),
+        ])
+
+        if (persistedImages.length === 0 && !session) {
+          set((state) => {
+            state.isHydrating = false
+          })
+          return
+        }
+
+        // Reconstruct ImageItems from persisted data
+        const reconstructed: ImageItem[] = []
+        for (const p of persistedImages) {
+          try {
+            const file = new File([p.imageBlob], p.fileName, { type: p.imageBlob.type || 'image/jpeg' })
+            const fullBitmap = await createImageBitmap(file)
+
+            // Create proxy bitmap
+            const scale = Math.min(1, MAX_PROXY_DIMENSION / Math.max(fullBitmap.width, fullBitmap.height))
+            let proxyBitmap: ImageBitmap
+            if (scale < 1) {
+              const proxyWidth = Math.round(fullBitmap.width * scale)
+              const proxyHeight = Math.round(fullBitmap.height * scale)
+              const canvas = new OffscreenCanvas(proxyWidth, proxyHeight)
+              const ctx = canvas.getContext('2d')!
+              ctx.drawImage(fullBitmap, 0, 0, proxyWidth, proxyHeight)
+              proxyBitmap = await createImageBitmap(canvas)
+            } else {
+              proxyBitmap = fullBitmap
+            }
+
+            reconstructed.push({
+              id: p.id,
+              file,
+              fileName: p.fileName,
+              originalWidth: p.originalWidth,
+              originalHeight: p.originalHeight,
+              proxyBitmap,
+              fullBitmap,
+              thumbnail: p.thumbnail,
+              editState: p.editState,
+              history: p.history,
+              historyIndex: p.historyIndex,
+              isLoading: false,
+              rating: p.rating,
+              flagStatus: p.flagStatus,
+              aiChatMessages: p.aiChatMessages,
+              aiLastResponse: p.aiLastResponse,
+            })
+          } catch (err) {
+            console.error(`Failed to reconstruct image ${p.fileName}:`, err)
+          }
+        }
+
+        set((state) => {
+          state.images = reconstructed
+
+          // Restore session metadata
+          if (session) {
+            state.customPresets = session.customPresets ?? []
+            state.filterFlag = session.filterFlag ?? 'all'
+            state.filterRating = session.filterRating ?? 0
+            state.viewMode = session.viewMode ?? 'edit'
+
+            // Restore currentImageIndex (clamp to valid range)
+            if (reconstructed.length > 0) {
+              const idx = Math.max(0, Math.min(session.currentImageIndex, reconstructed.length - 1))
+              state.currentImageIndex = idx
+            } else {
+              state.currentImageIndex = -1
+            }
+          } else if (reconstructed.length > 0) {
+            state.currentImageIndex = 0
+          }
+
+          // Sync legacy state from current image
+          if (state.currentImageIndex >= 0 && state.currentImageIndex < state.images.length) {
+            const img = state.images[state.currentImageIndex]
+            state.imageSource = {
+              file: img.file,
+              originalWidth: img.originalWidth,
+              originalHeight: img.originalHeight,
+              proxyBitmap: img.proxyBitmap,
+              fullBitmap: img.fullBitmap,
+            }
+            state.editState = img.editState
+            state.history = img.history
+            state.historyIndex = img.historyIndex
+            state.aiChatMessages = img.aiChatMessages
+            state.aiLastResponse = img.aiLastResponse
+          }
+
+          state.isHydrating = false
+        })
+      } catch (err) {
+        console.error('Failed to hydrate from IndexedDB:', err)
+        set((state) => {
+          state.isHydrating = false
+        })
+      }
     },
 
     // Load single image
@@ -338,6 +597,8 @@ export const useEditorStore = create<EditorStore>()(
           state.editState = newImage.editState
           state.history = newImage.history
           state.historyIndex = newImage.historyIndex
+          state.aiChatMessages = newImage.aiChatMessages
+          state.aiLastResponse = newImage.aiLastResponse
           state.isLoading = false
           state.isLoadingImages = false
           state.zoom = 1
@@ -346,6 +607,13 @@ export const useEditorStore = create<EditorStore>()(
 
         // Push initial history
         get().pushHistory('Open image')
+
+        // Persist to IndexedDB
+        const currentImg = get().images[get().currentImageIndex]
+        if (currentImg) {
+          dbSaveImage(toPersistedImage(currentImg)).catch(console.error)
+        }
+        persistSession(get())
       } catch (error) {
         console.error('Failed to load image:', error)
         set((state) => {
@@ -365,8 +633,6 @@ export const useEditorStore = create<EditorStore>()(
       })
 
       try {
-        const newImages: ImageItem[] = []
-
         for (let i = 0; i < files.length; i++) {
           const file = files[i]
           try {
@@ -375,7 +641,6 @@ export const useEditorStore = create<EditorStore>()(
               ...imageData,
               id: `img-${Date.now()}-${i}`,
             }
-            newImages.push(newImage)
 
             // Push initial history for each image
             newImage.history.push({
@@ -386,46 +651,46 @@ export const useEditorStore = create<EditorStore>()(
             newImage.historyIndex = 0
 
             set((state) => {
+              state.images.push(newImage)
               state.loadingProgress.current = i + 1
+
+              // If no current image, select the first new one
+              if (state.currentImageIndex === -1) {
+                state.currentImageIndex = state.images.length - 1
+
+                // Sync legacy state with current image
+                const currentImg = state.images[state.currentImageIndex]
+                if (currentImg) {
+                  state.imageSource = {
+                    file: currentImg.file,
+                    originalWidth: currentImg.originalWidth,
+                    originalHeight: currentImg.originalHeight,
+                    proxyBitmap: currentImg.proxyBitmap,
+                    fullBitmap: currentImg.fullBitmap,
+                  }
+                  state.editState = currentImg.editState
+                  state.history = currentImg.history
+                  state.historyIndex = currentImg.historyIndex
+                  state.aiChatMessages = currentImg.aiChatMessages
+                  state.aiLastResponse = currentImg.aiLastResponse
+                }
+
+                state.zoom = 1
+                state.panOffset = { x: 0, y: 0 }
+              }
             })
+
+            // Persist each image to IndexedDB
+            dbSaveImage(toPersistedImage(newImage)).catch(console.error)
           } catch (error) {
             console.error(`Failed to load image ${file.name}:`, error)
           }
         }
 
-        if (newImages.length > 0) {
-          set((state) => {
-            state.images = [...state.images, ...newImages]
-
-            // If no current image, select the first new one
-            if (state.currentImageIndex === -1) {
-              state.currentImageIndex = state.images.length - newImages.length
-            }
-
-            // Sync legacy state with current image
-            const currentImg = state.images[state.currentImageIndex]
-            if (currentImg) {
-              state.imageSource = {
-                file: currentImg.file,
-                originalWidth: currentImg.originalWidth,
-                originalHeight: currentImg.originalHeight,
-                proxyBitmap: currentImg.proxyBitmap,
-                fullBitmap: currentImg.fullBitmap,
-              }
-              state.editState = currentImg.editState
-              state.history = currentImg.history
-              state.historyIndex = currentImg.historyIndex
-            }
-
-            state.isLoadingImages = false
-            state.zoom = 1
-            state.panOffset = { x: 0, y: 0 }
-          })
-        } else {
-          set((state) => {
-            state.isLoadingImages = false
-          })
-        }
+        set((state) => {
+          state.isLoadingImages = false
+        })
+        persistSession(get())
       } catch (error) {
         console.error('Failed to load images:', error)
         set((state) => {
@@ -436,6 +701,7 @@ export const useEditorStore = create<EditorStore>()(
 
     // Remove image
     removeImage: (index: number) => {
+      const removedId = get().images[index]?.id
       set((state) => {
         if (index < 0 || index >= state.images.length) return
 
@@ -448,6 +714,8 @@ export const useEditorStore = create<EditorStore>()(
           state.editState = createDefaultEditState()
           state.history = []
           state.historyIndex = -1
+          state.aiChatMessages = []
+          state.aiLastResponse = null
         } else if (state.currentImageIndex >= state.images.length) {
           state.currentImageIndex = state.images.length - 1
         } else if (index < state.currentImageIndex) {
@@ -467,8 +735,16 @@ export const useEditorStore = create<EditorStore>()(
           state.editState = currentImg.editState
           state.history = currentImg.history
           state.historyIndex = currentImg.historyIndex
+          state.aiChatMessages = currentImg.aiChatMessages
+          state.aiLastResponse = currentImg.aiLastResponse
         }
       })
+
+      // Persist deletion to IndexedDB
+      if (removedId) {
+        dbDeleteImage(removedId).catch(console.error)
+      }
+      persistSession(get())
     },
 
     // Clear all images
@@ -480,7 +756,13 @@ export const useEditorStore = create<EditorStore>()(
         state.editState = createDefaultEditState()
         state.history = []
         state.historyIndex = -1
+        state.aiChatMessages = []
+        state.aiLastResponse = null
       })
+
+      // Persist to IndexedDB
+      dbClearAllImages().catch(console.error)
+      persistSession(get())
     },
 
     // Set current image
@@ -494,6 +776,8 @@ export const useEditorStore = create<EditorStore>()(
           currentImg.editState = JSON.parse(JSON.stringify(state.editState))
           currentImg.history = state.history
           currentImg.historyIndex = state.historyIndex
+          currentImg.aiChatMessages = state.aiChatMessages
+          currentImg.aiLastResponse = state.aiLastResponse
         }
 
         state.currentImageIndex = index
@@ -510,9 +794,14 @@ export const useEditorStore = create<EditorStore>()(
         state.editState = newImg.editState
         state.history = newImg.history
         state.historyIndex = newImg.historyIndex
+        state.aiChatMessages = newImg.aiChatMessages
+        state.aiLastResponse = newImg.aiLastResponse
         state.zoom = 1
         state.panOffset = { x: 0, y: 0 }
       })
+
+      // Persist session metadata (currentImageIndex changed)
+      persistSession(get())
     },
 
     // Next image
@@ -538,15 +827,112 @@ export const useEditorStore = create<EditorStore>()(
           state.images[index].rating = Math.max(0, Math.min(5, rating))
         }
       })
+      const img = get().images[index]
+      if (img) debouncedSaveImage(img)
+    },
+
+    // Set image flag
+    setImageFlag: (index: number, flag: FlagStatus) => {
+      set((state) => {
+        if (index >= 0 && index < state.images.length) {
+          state.images[index].flagStatus = flag
+        }
+      })
+      const img = get().images[index]
+      if (img) debouncedSaveImage(img)
+    },
+
+    // Filter actions
+    setFilterFlag: (filter) => {
+      set((state) => {
+        state.filterFlag = filter
+      })
+      persistSession(get())
+    },
+
+    setFilterRating: (rating) => {
+      set((state) => {
+        state.filterRating = rating
+      })
+      persistSession(get())
+    },
+
+    // View mode
+    setViewMode: (mode) => {
+      set((state) => {
+        state.viewMode = mode
+      })
+      persistSession(get())
+    },
+
+    // Get filtered images
+    getFilteredImages: () => {
+      const { images, filterFlag, filterRating } = get()
+      return images.filter((img) => {
+        if (filterFlag !== 'all') {
+          if (filterFlag === 'unflagged' && img.flagStatus !== 'none') return false
+          if (filterFlag === 'picked' && img.flagStatus !== 'picked') return false
+          if (filterFlag === 'rejected' && img.flagStatus !== 'rejected') return false
+        }
+        if (filterRating > 0 && img.rating < filterRating) return false
+        return true
+      })
+    },
+
+    // Custom presets
+    addCustomPreset: (preset: PresetData) => {
+      set((state) => {
+        state.customPresets.push(preset)
+      })
+      persistSession(get())
+    },
+
+    removeCustomPreset: (name: string) => {
+      set((state) => {
+        state.customPresets = state.customPresets.filter((p) => p.name !== name)
+      })
+      persistSession(get())
+    },
+
+    // AI chat
+    setAIChatState: (messages, lastResponse) => {
+      set((state) => {
+        state.aiChatMessages = messages
+        state.aiLastResponse = lastResponse
+        if (state.currentImageIndex >= 0 && state.images[state.currentImageIndex]) {
+          state.images[state.currentImageIndex].aiChatMessages = messages
+          state.images[state.currentImageIndex].aiLastResponse = lastResponse
+        }
+      })
+      persistCurrentImage(get())
+    },
+
+    // AI focus
+    requestAIInputFocus: () => {
+      set((state) => {
+        state.aiInputFocusRequested = true
+      })
+    },
+
+    clearAIInputFocusRequest: () => {
+      set((state) => {
+        state.aiInputFocusRequested = false
+      })
     },
 
     resetImage: () => {
+      const removedId = get().getCurrentImage()?.id
       set((state) => {
         if (state.currentImageIndex >= 0) {
           state.images.splice(state.currentImageIndex, 1)
           if (state.images.length === 0) {
             state.currentImageIndex = -1
             state.imageSource = null
+            state.editState = createDefaultEditState()
+            state.history = []
+            state.historyIndex = -1
+            state.aiChatMessages = []
+            state.aiLastResponse = null
           } else if (state.currentImageIndex >= state.images.length) {
             state.currentImageIndex = state.images.length - 1
             const img = state.images[state.currentImageIndex]
@@ -560,12 +946,31 @@ export const useEditorStore = create<EditorStore>()(
             state.editState = img.editState
             state.history = img.history
             state.historyIndex = img.historyIndex
+            state.aiChatMessages = img.aiChatMessages
+            state.aiLastResponse = img.aiLastResponse
+          } else {
+            const img = state.images[state.currentImageIndex]
+            state.imageSource = {
+              file: img.file,
+              originalWidth: img.originalWidth,
+              originalHeight: img.originalHeight,
+              proxyBitmap: img.proxyBitmap,
+              fullBitmap: img.fullBitmap,
+            }
+            state.editState = img.editState
+            state.history = img.history
+            state.historyIndex = img.historyIndex
+            state.aiChatMessages = img.aiChatMessages
+            state.aiLastResponse = img.aiLastResponse
           }
         }
-        state.editState = createDefaultEditState()
-        state.history = []
-        state.historyIndex = -1
       })
+
+      // Persist deletion to IndexedDB
+      if (removedId) {
+        dbDeleteImage(removedId).catch(console.error)
+      }
+      persistSession(get())
     },
 
     // Basic adjustments
@@ -577,6 +982,7 @@ export const useEditorStore = create<EditorStore>()(
           state.images[state.currentImageIndex].editState.basic[key] = value
         }
       })
+      persistCurrentImage(get())
     },
 
     resetBasicAdjustments: () => {
@@ -832,6 +1238,7 @@ export const useEditorStore = create<EditorStore>()(
             state.images[currentImageIndex].historyIndex = historyIndex - 1
           }
         })
+        persistCurrentImage(get())
       }
     },
 
@@ -847,6 +1254,7 @@ export const useEditorStore = create<EditorStore>()(
             state.images[currentImageIndex].historyIndex = historyIndex + 1
           }
         })
+        persistCurrentImage(get())
       }
     },
 
@@ -878,6 +1286,9 @@ export const useEditorStore = create<EditorStore>()(
           state.images[currentImageIndex].historyIndex = state.historyIndex
         }
       })
+
+      // Persist current image (edit state + history changed)
+      persistCurrentImage(get())
     },
 
     canUndo: () => get().historyIndex > 0,

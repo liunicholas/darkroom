@@ -21,8 +21,6 @@ export function CropPanel() {
   const crop = useEditorStore((state) => state.editState.crop)
   const setCrop = useEditorStore((state) => state.setCrop)
   const resetCrop = useEditorStore((state) => state.resetCrop)
-  const activeTool = useEditorStore((state) => state.activeTool)
-  const setActiveTool = useEditorStore((state) => state.setActiveTool)
   const pushHistory = useEditorStore((state) => state.pushHistory)
 
   const handleAspectRatioChange = useCallback((value: string) => {
@@ -64,29 +62,11 @@ export function CropPanel() {
     pushHistory('Rotate 90 CCW')
   }, [setCrop, crop.rotation, pushHistory])
 
-  const isCropActive = activeTool === 'crop'
-
   return (
     <div className="space-y-4">
-      {/* Crop mode toggle */}
-      <div className="space-y-2">
-        <button
-          onClick={() => setActiveTool(isCropActive ? 'select' : 'crop')}
-          className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-colors ${
-            isCropActive
-              ? 'bg-maroon text-white'
-              : 'bg-dark-600 text-gray-300 hover:bg-dark-500'
-          }`}
-        >
-          <CropIcon />
-          {isCropActive ? 'Exit Crop Mode' : 'Enter Crop Mode'}
-        </button>
-        {isCropActive && (
-          <p className="text-xs text-gray-500 text-center">
-            Drag corners to crop, drag inside to move
-          </p>
-        )}
-      </div>
+      <p className="text-xs text-gray-500 text-center">
+        Drag corners to crop, drag inside to move
+      </p>
 
       {/* Aspect ratio presets */}
       <div className="space-y-2">
@@ -185,14 +165,6 @@ export function CropPanel() {
 }
 
 // Icons
-function CropIcon() {
-  return (
-    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 3v18h18M9 3v12h12" />
-    </svg>
-  )
-}
-
 function RotateCWIcon() {
   return (
     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

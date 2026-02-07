@@ -124,6 +124,9 @@ export interface CropState {
   flipVertical: boolean
 }
 
+// Flag status for photo selection workflow
+export type FlagStatus = 'none' | 'picked' | 'rejected'
+
 // Aspect ratio presets
 export type AspectRatioPreset =
   | 'free'
@@ -230,4 +233,7 @@ export interface ImageItem {
   historyIndex: number
   isLoading: boolean
   rating: number // 0-5 star rating (0 = no rating)
+  flagStatus: FlagStatus
+  aiChatMessages: { role: string; content: string }[]
+  aiLastResponse: { explanation: string; adjustments: unknown } | null
 }

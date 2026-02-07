@@ -10,7 +10,7 @@ const config: Config = {
     extend: {
       fontFamily: {
         body: ['var(--font-body)', 'system-ui', 'sans-serif'],
-        display: ['var(--font-display)', 'Georgia', 'serif'],
+        display: ['var(--font-display)', 'ui-monospace', 'monospace'],
       },
       colors: {
         dark: {
@@ -28,6 +28,12 @@ const config: Config = {
           dark: '#6B1D16',
           muted: 'rgba(140, 39, 30, 0.2)',
           glow: 'rgba(140, 39, 30, 0.4)',
+        },
+        maroon: {
+          DEFAULT: '#8C271E',
+          light: '#A63228',
+          dark: '#6B1D16',
+          muted: 'rgba(140, 39, 30, 0.2)',
         },
       },
       boxShadow: {

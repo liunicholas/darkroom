@@ -3,6 +3,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import { useEditorStore } from '@/stores/editor-store'
 import { WebGLRenderer } from '@/lib/webgl/WebGLRenderer'
+import { Canvas2DRenderer } from '@/lib/webgl/Canvas2DRenderer'
 import { BrushEngine } from '@/lib/masking/BrushEngine'
 import { generateRadialGradientMask, generateLinearGradientMask } from '@/lib/masking/GradientMask'
 import { RadialGradientHandles, LinearGradientHandles } from '@/components/overlays/GradientHandles'
@@ -12,7 +13,7 @@ import type { RadialGradientData, LinearGradientData } from '@/types/edit-state'
 export function MainCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const rendererRef = useRef<WebGLRenderer | null>(null)
+  const rendererRef = useRef<WebGLRenderer | Canvas2DRenderer | null>(null)
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const editedImageRef = useRef<ImageBitmap | null>(null)
   const animationFrameRef = useRef<number>(0)
@@ -44,26 +45,60 @@ export function MainCanvas() {
   const crop = useEditorStore((state) => state.editState.crop)
   const pushHistory = useEditorStore((state) => state.pushHistory)
 
-  // Initialize offscreen canvas and WebGL renderer
+  // Clear display canvas when there's no image to show
+  useEffect(() => {
+    if (!imageSource?.proxyBitmap) {
+      const displayCanvas = canvasRef.current
+      if (displayCanvas) {
+        const ctx = displayCanvas.getContext('2d')
+        if (ctx) {
+          ctx.fillStyle = '#121212'
+          ctx.fillRect(0, 0, displayCanvas.width, displayCanvas.height)
+        }
+      }
+      if (rendererRef.current) {
+        rendererRef.current.dispose()
+        rendererRef.current = null
+      }
+      offscreenCanvasRef.current = null
+      editedImageRef.current = null
+    }
+  }, [imageSource])
+
+  // Initialize offscreen canvas and renderer (WebGL2 with Canvas2D fallback)
   useEffect(() => {
     if (!imageSource?.proxyBitmap) return
 
-    try {
-      // Create offscreen canvas at image resolution
-      const offscreen = document.createElement('canvas')
-      offscreen.width = imageSource.proxyBitmap.width
-      offscreen.height = imageSource.proxyBitmap.height
-      offscreenCanvasRef.current = offscreen
+    // Create offscreen canvas at image resolution
+    const offscreen = document.createElement('canvas')
+    offscreen.width = imageSource.proxyBitmap.width
+    offscreen.height = imageSource.proxyBitmap.height
+    offscreenCanvasRef.current = offscreen
 
-      // Create WebGL renderer for the offscreen canvas
+    // Try WebGL2 first, fall back to Canvas2D
+    try {
       const renderer = new WebGLRenderer(offscreen)
       renderer.setImage(imageSource.proxyBitmap)
       rendererRef.current = renderer
-
       setWebglError(null)
-    } catch (error) {
-      console.error('WebGL initialization failed:', error)
-      setWebglError('WebGL2 is not supported in your browser')
+    } catch {
+      try {
+        // Canvas2D fallback — recreate offscreen canvas since the failed
+        // webgl2 getContext call taints it for 2d use
+        const fallbackCanvas = document.createElement('canvas')
+        fallbackCanvas.width = imageSource.proxyBitmap.width
+        fallbackCanvas.height = imageSource.proxyBitmap.height
+        offscreenCanvasRef.current = fallbackCanvas
+
+        const fallback = new Canvas2DRenderer(fallbackCanvas)
+        fallback.setImage(imageSource.proxyBitmap)
+        rendererRef.current = fallback
+        setWebglError(null)
+        console.warn('WebGL2 not available, using Canvas2D fallback (some effects will be limited)')
+      } catch (error) {
+        console.error('All renderers failed:', error)
+        setWebglError('Could not initialize any rendering backend')
+      }
     }
 
     return () => {
@@ -558,7 +593,7 @@ export function MainCanvas() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
-          <h3 className="text-xl font-display font-bold text-white mb-2">WebGL2 Required</h3>
+          <h3 className="text-base font-display font-medium text-white mb-2 uppercase tracking-wide">WebGL2 Required</h3>
           <p className="text-gray-400">{webglError}</p>
         </div>
       </div>
@@ -677,17 +712,14 @@ export function MainCanvas() {
         {Math.round(zoom * 100)}%
       </div>
 
-      {/* No image placeholder */}
+      {/* Empty state hint */}
       {!imageSource && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center">
-            <div className="w-24 h-24 rounded-xl bg-dark-800 flex items-center justify-center mx-auto mb-4">
-              <svg className="w-12 h-12 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            </div>
-            <p className="text-gray-500">No image loaded</p>
-            <p className="text-gray-600 text-sm mt-1">Import an image to start editing</p>
+            <svg className="w-10 h-10 mx-auto mb-3 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
+            </svg>
+            <p className="text-sm text-gray-600">Import images or a folder to get started</p>
           </div>
         </div>
       )}
@@ -705,20 +737,17 @@ function HistogramDisplay({ offscreenCanvas, editState }: { offscreenCanvas: HTM
       return
     }
 
-    // Small delay to ensure WebGL has finished rendering
+    // Small delay to ensure rendering has finished
     const timeoutId = setTimeout(() => {
-      // Read pixels from the WebGL canvas
-      const gl = offscreenCanvas.getContext('webgl2')
-      if (!gl) return
-
       const width = offscreenCanvas.width
       const height = offscreenCanvas.height
+      if (width === 0 || height === 0) return
 
       // Read a downsampled version for performance
       const sampleWidth = Math.min(width, 256)
       const sampleHeight = Math.min(height, 256)
 
-      // Create a temporary canvas to sample from the WebGL canvas
+      // Sample from the offscreen canvas (works for both WebGL and Canvas2D)
       const tempCanvas = document.createElement('canvas')
       tempCanvas.width = sampleWidth
       tempCanvas.height = sampleHeight
